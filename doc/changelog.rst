@@ -1,6 +1,31 @@
 Release history
 ===============
 
+
+py2app 0.8
+-----------
+
+py2app 0.8 is a feature release
+
+- Issue #83: Setup.py now refuses to install when the current
+  platform is not Mac OS X. 
+  
+  This makes it clear that the package is only supported on OSX and 
+  avoids confusing errors later on.
+
+- Issue #39: It is now possible to have subpackages on
+  in the "packages" option of py2app.
+
+- Issue #37: Add recipe for pyEnchant
+
+  ..note::
+
+    The recipe only works for installations of pyEnchant
+    where pyEnchant is stored in the installation (such
+    as the binary eggs on PyPI), not for installations
+    that either use the "PYENCHANT_LIBRARY_PATH" environment
+    variable or MacPorts.
+
 py2app 0.7.3
 ------------
 
