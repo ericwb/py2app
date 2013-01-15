@@ -1,6 +1,51 @@
 Release history
 ===============
 
+
+py2app 0.8
+-----------
+
+py2app 0.8 is a feature release
+
+- Issue #80: Add support for copying system plugins into the application
+  bundle.
+ 
+  Py2app now supports a new option *include_plugins*. The value of this
+  is a list of paths to plugins that should be copied into the application
+  bundle. 
+
+  Items in the list are either paths, or a tuple with the plugin type
+  and the path::
+
+      include_plugins=[
+        "MyPlugins/MyDocument.qlgenerator",
+        ("SystemConfiguration", "MyPlugins/MyConfig.plugin"),
+      ]
+
+  Py2app currently knows about the following plugin suffixes: 
+  ``.qlgenerator``, ``.mdimporter``, ``.xpc``, ``.service``, 
+  ``.prefPane``, ``.iaplugin`` and ``.action``. These plugins
+  can be added without specifying the plugin type.
+
+- Issue #83: Setup.py now refuses to install when the current
+  platform is not Mac OS X. 
+  
+  This makes it clear that the package is only supported on OSX and 
+  avoids confusing errors later on.
+
+- Issue #39: It is now possible to have subpackages on
+  in the "packages" option of py2app.
+
+- Issue #37: Add recipe for pyEnchant
+
+  ..note::
+
+    The recipe only works for installations of pyEnchant
+    where pyEnchant is stored in the installation (such
+    as the binary eggs on PyPI), not for installations
+    that either use the "PYENCHANT_LIBRARY_PATH" environment
+    variable or MacPorts.
+
 py2app 0.7.3
 ------------
 
