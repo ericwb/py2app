@@ -59,6 +59,17 @@ from py2app import recipes
 from distutils.sysconfig import get_config_var
 PYTHONFRAMEWORK=get_config_var('PYTHONFRAMEWORK')
 
+
+PLUGIN_SUFFIXES = {
+        '.qlgenerator':    'QuickLook',
+        '.mdimporter':     'Spotlight',
+        '.xpc':            'XPCServices',
+        '.service':        'Services',
+        '.prefPane':       'PreferencePanes',
+        '.iaplugin':       'InternetAccounts',
+        '.action':         'Automator',
+}
+
 try:
     basestring
 except NameError:
@@ -240,7 +251,7 @@ class py2app(Command):
         ("alias", 'A',
          "Use an alias to current source file (for development only!)"),
         ("argv-emulation", 'a',
-         "Use argv emulation [disabled for plugins]. Does not work with python 3.x"),
+         "Use argv emulation [disabled for plugins]."),
         ("argv-inject=", None,
          "Inject some commands into the argv"),
         ("emulate-shell-environment", None,
@@ -265,6 +276,7 @@ class py2app(Command):
         ("qt-plugins=", None, "set of Qt plugins to include in the application bundle (default None)"),
         ("matplotlib-backends=", None, "set of matplotlib backends to include (default: include entire package)"),
         ("extra-scripts=", None, "set of scripts to include in the application bundle, next to the main application script"),
+        ("include-plugins=", None, "List of plugins to include"),
         ]
 
     boolean_options = [
@@ -328,6 +340,7 @@ class py2app(Command):
         self.qt_plugins = None
         self.matplotlib_backends = None
         self.extra_scripts = None
+        self.include_plugins = None
 
     def finalize_options (self):
         if not self.strip:
@@ -343,9 +356,6 @@ class py2app(Command):
         #    self.includes.add('pkgutil')
         #    self.includes.add('imp')
         self.packages = set(fancy_split(self.packages))
-        for pkg in self.packages:
-            if "." in pkg:
-                raise DistutilsOptionError("Cannot include subpackages using the 'packages' option")
 
         self.excludes = set(fancy_split(self.excludes))
         self.excludes.add('readline')
@@ -411,6 +421,7 @@ class py2app(Command):
         self.qt_plugins = fancy_split(self.qt_plugins)
         self.matplotlib_backends = fancy_split(self.matplotlib_backends)
         self.extra_scripts = fancy_split(self.extra_scripts)
+        self.include_plugins = fancy_split(self.include_plugins)
 
 
         if self.datamodels:
@@ -583,7 +594,22 @@ class py2app(Command):
         for src, dest in self.iter_mappingmodels(resdir):
             self.mkpath(os.path.dirname(dest))
             mapc(src, dest)
-        
+
+    def iter_extra_plugins(self):
+        for item in self.include_plugins:
+            if isinstance(item, (list, tuple)):
+                subdir, path = item
+
+            else:
+                ext = os.path.splitext(item)[1]
+                try:
+                    subdir = PLUGIN_SUFFIXES[ext]
+                    path = item
+                except KeyError:
+                    raise DistutilsOptionError("Cannot determine subdirectory for plugin %s"%(item,))
+
+            yield path, os.path.join(subdir, os.path.basename(path))
+
     def iter_data_files(self):
         dist = self.distribution
         allres = chain(getattr(dist, 'data_files', ()) or (), self.resources)
@@ -624,7 +650,7 @@ class py2app(Command):
             result['PyOptions']['optimize'] = self.optimize
         return result
 
-    
+
     def initialize_plist(self):
         plist = self.get_default_plist()
         for target in self.targets:
@@ -835,7 +861,7 @@ class py2app(Command):
 
         if os.path.exists(self.bdist_dir):
             shutil.rmtree(self.bdist_dir)
-        
+
         self.collect_dir = os.path.abspath(
             os.path.join(self.bdist_dir, "collect"))
         self.mkpath(self.collect_dir)
@@ -1276,6 +1302,12 @@ class py2app(Command):
         #if self.style == 'app':
         #    prescripts.append('setup_pkgresource')
 
+        included_subpkg = [pkg for pkg in self.packages if '.' in pkg]
+        if included_subpkg:
+            prescripts.append('setup_included_subpackages')
+            prescripts.append(StringIO('_path_hooks = %r'%(
+                included_subpkg)))
+
         if self.emulate_shell_environment:
             prescripts.append('emulate_shell_environment')
 
@@ -1394,7 +1426,7 @@ class py2app(Command):
             else:
                 basename = fmwk['shortname'] + '.framework'
                 yield os.path.join(fmwk['location'], basename)
-    
+
     def build_alias_executable(self, target, script, extra_scripts):
         # Build an alias executable for the target
         appdir, resdir, plist = self.create_bundle(target, script)
@@ -1419,8 +1451,8 @@ class py2app(Command):
         self.symlink(
             os.path.join(realhome, 'config'),
             os.path.join(pyhome, 'config'))
-            
-        
+
+
         # symlink data files
         # XXX: fixme: need to integrate automatic data conversion
         for src, dest in self.iter_data_files():
@@ -1430,6 +1462,20 @@ class py2app(Command):
             makedirs(os.path.dirname(dest))
             try:
                 copy_resource(src, dest, dry_run=self.dry_run, symlink=1)
+            except:
+                import traceback
+                traceback.print_exc()
+                raise
+
+        plugindir = os.path.join(appdir, 'Contents', 'Library')
+        for src, dest in self.iter_extra_plugins():
+            dest = os.path.join(plugindir, dest)
+            if src == dest:
+                continue
+
+            makedirs(os.path.dirname(dest))
+            try:
+                copy_resource(src, dest, dry_run=self.dry_run)
             except:
                 import traceback
                 traceback.print_exc()
@@ -1724,17 +1770,18 @@ class py2app(Command):
         if sys.version_info[0] != 2:
             import zlib
             self.copy_file(zlib.__file__, os.path.dirname(arcdir))
-        
+
         ext_dir = os.path.join(pydir, os.path.basename(self.ext_dir))
         self.copy_tree(self.ext_dir, ext_dir, preserve_symlinks=True)
         self.copy_tree(self.framework_dir,
             os.path.join(appdir, 'Contents', 'Frameworks'),
             preserve_symlinks=True)
         for pkg in self.packages:
-            pkg = self.get_bootstrap(pkg)
-            dst = os.path.join(pydir, os.path.basename(pkg))
+            pkg_path = self.get_bootstrap(pkg)
+            dst = os.path.join(pydir, pkg)
             self.mkpath(dst)
-            self.copy_tree(pkg, dst)
+            self.copy_tree(pkg_path, dst)
+
         for copyext in copyexts:
             fn = os.path.join(ext_dir,
                 (copyext.identifier.replace('.', os.sep) +
@@ -1775,6 +1822,15 @@ class py2app(Command):
             dest = os.path.join(resdir, dest)
             if src == dest:
                 continue
+            makedirs(os.path.dirname(dest))
+            copy_resource(src, dest, dry_run=self.dry_run)
+
+        plugindir = os.path.join(appdir, 'Contents', 'Library')
+        for src, dest in self.iter_extra_plugins():
+            dest = os.path.join(plugindir, dest)
+            if src == dest:
+                continue
+
             makedirs(os.path.dirname(dest))
             copy_resource(src, dest, dry_run=self.dry_run)
 
