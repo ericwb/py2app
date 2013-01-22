@@ -134,7 +134,7 @@ class TestBasicApp (unittest.TestCase):
 
     #
     # End of setup code
-    # 
+    #
 
     def test_basic_start(self):
         p = self.start_app()
@@ -223,6 +223,15 @@ class TestBasicAliasApp (TestBasicApp):
     py2app_args = [ '--alias', ]
 
 class TestBasicSemiStandaloneApp (TestBasicApp):
+    py2app_args = [ '--semi-standalone', ]
+
+class TestBasicAppScriptName (unittest.TestCase):
+    app_dir = os.path.join(DIR_NAME, 'basic_app2')
+
+class TestBasicAliasAppScriptName (TestBasicAppScriptName):
+    py2app_args = [ '--alias', ]
+
+class TestBasicSemiStandaloneAppScriptName (TestBasicAppScriptName):
     py2app_args = [ '--semi-standalone', ]
 
 class TestBasicAppWindowsLineEnd (TestBasicApp):
@@ -345,4 +354,3 @@ class TestOptimized2 (TestBasicApp):
 
 if __name__ == "__main__":
     unittest.main()
-
