@@ -11,7 +11,23 @@ to make standalone application bundles and plugins from Python
 scripts. py2app is similar in purpose and design to `py2exe`_ for
 Windows.
 
-This documentation corresponds to version 0.4.2 of py2app.
+Contents
+--------
+
+.. toctree::
+   :maxdepth: 2
+
+   install
+   dependencies
+   faq
+   tutorial
+   tweaking
+   examples
+   options
+   recipes
+   implementation
+   py2applet
+   changelog
 
 Online Resources
 ----------------
@@ -41,24 +57,7 @@ licenses.
 
 Copyright (c) 2004-2006 Bob Ippolito <bob at redivi.com>.
 
-Copyright (c) 2010-2011 Ronald Oussoren <ronaldoussoren at mac.com>.
-
-Contents:
-
-.. toctree::
-   :maxdepth: 2
-
-   install
-   dependencies
-   faq
-   tutorial
-   tweaking
-   examples
-   options
-   recipes
-   implementation
-   py2applet
-   changelog
+Copyright (c) 2010-2012 Ronald Oussoren <ronaldoussoren at mac.com>.
 
 .. _`setuptools`: http://pypi.python.org/pypi/setuptools/
 .. _`py2exe`: http://pypi.python.org/pypi/py2exe/
