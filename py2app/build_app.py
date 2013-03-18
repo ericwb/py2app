@@ -38,6 +38,8 @@ from modulegraph import zipio
 
 import macholib.dyld
 import macholib.MachOStandalone
+import macholib.MachO
+from macholib.util import flipwritable
 
 from py2app.create_appbundle import create_appbundle
 from py2app.create_pluginbundle import create_pluginbundle
@@ -53,10 +55,91 @@ from py2app import recipes
 from distutils.sysconfig import get_config_var
 PYTHONFRAMEWORK=get_config_var('PYTHONFRAMEWORK')
 
+
+PLUGIN_SUFFIXES = {
+        '.qlgenerator':    'QuickLook',
+        '.mdimporter':     'Spotlight',
+        '.xpc':            'XPCServices',
+        '.service':        'Services',
+        '.prefPane':       'PreferencePanes',
+        '.iaplugin':       'InternetAccounts',
+        '.action':         'Automator',
+}
+
 try:
     basestring
 except NameError:
     basestring = str
+
+def rewrite_tkinter_load_commands(tkinter_path):
+    print("rewrite_tk", tkinter_path)
+    m = macholib.MachO.MachO(tkinter_path)
+    tcl_path = None
+    tk_path = None
+
+    rewrite_map = {}
+
+    for header in m.headers:
+        for idx, name, other in header.walkRelocatables():
+            if other.endswith('/Tk'):
+                if tk_path is not None and other != tk_path:
+                    raise DistutilsPlatformError('_tkinter is linked to different Tk paths')
+                tk_path = other
+            elif other.endswith('/Tcl'):
+                if tcl_path is not None and other != tcl_path:
+                    raise DistutilsPlatformError('_tkinter is linked to different Tcl paths')
+                tcl_path = other
+
+    if tcl_path is None or 'Tcl.framework' not in tcl_path:
+        raise DistutilsPlatformError('_tkinter is not linked a Tcl.framework')
+
+    if tk_path is None or 'Tk.framework' not in tk_path:
+        raise DistutilsPlatformError('_tkinter is not linked a Tk.framework')
+
+    system_tcl_versions = [nm for nm in os.listdir('/System/Library/Frameworks/Tcl.framework/Versions') if nm != 'Current']
+    system_tk_versions = [nm for nm in os.listdir('/System/Library/Frameworks/Tk.framework/Versions') if nm != 'Current']
+
+    if not tcl_path.startswith('/System/Library/Frameworks'):
+        # ../Versions/8.5/Tcl
+        ver = os.path.basename(os.path.dirname(tcl_path))
+        if ver not in system_tcl_versions:
+            raise DistutilsPlatformError('_tkinter is linked to a version of Tcl not in /System')
+
+        rewrite_map[tcl_path] = '/System/Library/Frameworks/Tcl.framework/Versions/%s/Tcl'%(ver,)
+
+    if not tk_path.startswith('/System/Library/Frameworks'):
+        # ../Versions/8.5/Tk
+        ver = os.path.basename(os.path.dirname(tk_path))
+        if ver not in system_tk_versions:
+            raise DistutilsPlatformError('_tkinter is linked to a version of Tk not in /System')
+
+        rewrite_map[tk_path] = '/System/Library/Frameworks/Tk.framework/Versions/%s/Tk'%(ver,)
+
+    if rewrite_map:
+        print("Relinking _tkinter.so to system Tcl/Tk")
+        rewroteAny = False
+        for header in m.headers:
+            for idx, name, other in header.walkRelocatables():
+                data = rewrite_map.get(other)
+                if data:
+                    if header.rewriteDataForCommand(idx, data.encode(sys.getfilesystemencoding())):
+                        rewroteAny = True
+
+        if rewroteAny:
+            old_mode = flipwritable(m.filename)
+            try:
+                with open(m.filename, 'rb+') as f:
+                    for header in m.headers:
+                        f.seek(0)
+                        header.write(f)
+                        f.seek(0, 2)
+                        f.flush()
+
+            finally:
+                flipwritable(m.filename, old_mode)
+
+    else:
+        print("_tkinter already linked against system Tcl/Tk")
 
 
 def get_zipfile(dist, semi_standalone=False):
@@ -240,7 +323,7 @@ class py2app(Command):
         ("alias", 'A',
          "Use an alias to current source file (for development only!)"),
         ("argv-emulation", 'a',
-         "Use argv emulation [disabled for plugins]. Does not work with python 3.x"),
+         "Use argv emulation [disabled for plugins]."),
         ("argv-inject=", None,
          "Inject some commands into the argv"),
         ("emulate-shell-environment", None,
@@ -265,6 +348,8 @@ class py2app(Command):
         ("qt-plugins=", None, "set of Qt plugins to include in the application bundle (default None)"),
         ("matplotlib-backends=", None, "set of matplotlib backends to include (default: include entire package)"),
         ("extra-scripts=", None, "set of scripts to include in the application bundle, next to the main application script"),
+        ("include-plugins=", None, "List of plugins to include"),
+        ("force-system-tk", None, "Ensure that Tkinter is linked against Apple's build of Tcl/Tk"),
         ]
 
     boolean_options = [
@@ -284,6 +369,7 @@ class py2app(Command):
         "graph",
         "prefer-ppc",
         "emulate-shell-environment",
+        "force-system-tk",
     ]
 
     def initialize_options (self):
@@ -328,6 +414,8 @@ class py2app(Command):
         self.qt_plugins = None
         self.matplotlib_backends = None
         self.extra_scripts = None
+        self.include_plugins = None
+        self.force_system_tk = False
 
     def finalize_options (self):
         if not self.strip:
@@ -343,9 +431,6 @@ class py2app(Command):
         #    self.includes.add('pkgutil')
         #    self.includes.add('imp')
         self.packages = set(fancy_split(self.packages))
-        for pkg in self.packages:
-            if "." in pkg:
-                raise DistutilsOptionError("Cannot include subpackages using the 'packages' option")
 
         self.excludes = set(fancy_split(self.excludes))
         self.excludes.add('readline')
@@ -411,6 +496,7 @@ class py2app(Command):
         self.qt_plugins = fancy_split(self.qt_plugins)
         self.matplotlib_backends = fancy_split(self.matplotlib_backends)
         self.extra_scripts = fancy_split(self.extra_scripts)
+        self.include_plugins = fancy_split(self.include_plugins)
 
 
         if self.datamodels:
@@ -584,6 +670,21 @@ class py2app(Command):
             self.mkpath(os.path.dirname(dest))
             mapc(src, dest)
 
+    def iter_extra_plugins(self):
+        for item in self.include_plugins:
+            if isinstance(item, (list, tuple)):
+                subdir, path = item
+
+            else:
+                ext = os.path.splitext(item)[1]
+                try:
+                    subdir = PLUGIN_SUFFIXES[ext]
+                    path = item
+                except KeyError:
+                    raise DistutilsOptionError("Cannot determine subdirectory for plugin %s"%(item,))
+
+            yield path, os.path.join(subdir, os.path.basename(path))
+
     def iter_data_files(self):
         dist = self.distribution
         allres = chain(getattr(dist, 'data_files', ()) or (), self.resources)
@@ -754,8 +855,7 @@ class py2app(Command):
 
     def build_xref(self, mf, flatpackages):
         for target in self.targets:
-            base = target.get_dest_base()
-            appdir = os.path.join(self.dist_dir, os.path.dirname(base))
+            appdir = target.appdir
             appname = self.get_appname()
             dgraph = os.path.join(appdir, appname + '.html')
             print("*** creating dependency html: %s ***"
@@ -955,7 +1055,20 @@ class py2app(Command):
 
                 else:
                     self.copy_file(sys.executable, execdst)
+
             if not self.debug_skip_macholib:
+                if self.force_system_tk:
+                    print("force system tk")
+                    resdir = os.path.join(dst, 'Contents', 'Resources')
+                    pydir = os.path.join(resdir, 'lib', 'python%s.%s'%(sys.version_info[:2]))
+                    ext_dir = os.path.join(pydir, os.path.basename(self.ext_dir))
+                    tkinter_path = os.path.join(ext_dir, '_tkinter.so')
+                    if os.path.exists(tkinter_path):
+                        rewrite_tkinter_load_commands(tkinter_path)
+                    else:
+                        print("tkinter not found at", tkinter_path)
+
+
                 mm = PythonStandalone(self, dst, executable_path=exp)
                 dylib, runtime = self.get_runtime()
                 if self.semi_standalone:
@@ -1283,6 +1396,12 @@ class py2app(Command):
         #if self.style == 'app':
         #    prescripts.append('setup_pkgresource')
 
+        included_subpkg = [pkg for pkg in self.packages if '.' in pkg]
+        if included_subpkg:
+            prescripts.append('setup_included_subpackages')
+            prescripts.append(StringIO('_path_hooks = %r'%(
+                included_subpkg)))
+
         if self.emulate_shell_environment:
             prescripts.append('emulate_shell_environment')
 
@@ -1442,6 +1561,20 @@ class py2app(Command):
                 traceback.print_exc()
                 raise
 
+        plugindir = os.path.join(appdir, 'Contents', 'Library')
+        for src, dest in self.iter_extra_plugins():
+            dest = os.path.join(plugindir, dest)
+            if src == dest:
+                continue
+
+            makedirs(os.path.dirname(dest))
+            try:
+                copy_resource(src, dest, dry_run=self.dry_run)
+            except:
+                import traceback
+                traceback.print_exc()
+                raise
+
         # symlink frameworks
         for src in self.iter_frameworks():
             dest = os.path.join(
@@ -1474,139 +1607,6 @@ class py2app(Command):
         bootfile.write("SCRIPT_MAP=%r\n"%(script_map,))
         bootfile.write('try:\n')
         bootfile.write('    _run()\n')
-        bootfile.write('except KeyboardInterrupt:\n')
-        bootfile.write('    pass\n')
-        bootfile.close()
-
-        target.appdir = appdir
-        return appdir
-
-
-    def build_executable(self, target, arcname, pkgexts, copyexts, script, extra_scripts):
-        # Build an executable for the target
-        appdir, resdir, plist = self.create_bundle(target, script)
-        self.appdir = appdir
-        self.resdir = resdir
-        self.plist = plist
-
-        for fn in extra_scripts:
-            if fn.endswith('.py'):
-                fn = fn[:-3]
-            elif fn.endswith('.pyw'):
-                fn = fn[:-4]
-
-            src_fn = script_executable(arch=self.arch)
-            tgt_fn = os.path.join(self.appdir, 'Contents', 'MacOS', os.path.basename(fn))
-            mergecopy(src_fn, tgt_fn)
-            make_exec(tgt_fn)
-
-
-        site_path = os.path.join(resdir, 'site.py')
-        byte_compile([
-            SourceModule('site', site_path),
-            ],
-            target_dir=resdir,
-            optimize=self.optimize,
-            force=self.force,
-            verbose=self.verbose,
-            dry_run=self.dry_run)
-        if not self.dry_run:
-            os.unlink(site_path)
-
-
-        includedir = None
-        configdir = None
-        includedir = get_config_var('CONFINCLUDEPY')
-        configdir = get_config_var('LIBPL')
-
-
-        if includedir is None:
-            includedir = 'python%d.%d'%(sys.version_info[:2])
-        else:
-            includedir = os.path.basename(includedir)
-
-        if configdir is None:
-            configdir = 'config'
-        else:
-            configdir = os.path.basename(configdir)
-
-        self.compile_datamodels(resdir)
-        self.compile_mappingmodels(resdir)
-
-        bootfn = '__boot__'
-        bootfile = open(os.path.join(resdir, bootfn + '.py'), 'w')
-        for fn in target.prescripts:
-            bootfile.write(self.get_bootstrap_data(fn))
-            bootfile.write('\n\n')
-
-        bootfile.write("DEFAULT_SCRIPT=%r\n"%(os.path.basename(script),))
-        bootfile.write('try:\n')
-        bootfile.write('    _run()\n' % os.path.realpath(script))
-        bootfile.write('except KeyboardInterrupt:\n')
-        bootfile.write('    pass\n')
-        bootfile.close()
-
-        target.appdir = appdir
-        return appdir
-
-    def build_executable(self, target, arcname, pkgexts, copyexts, script, extra_scripts):
-        # Build an executable for the target
-        appdir, resdir, plist = self.create_bundle(target, script)
-        self.appdir = appdir
-        self.resdir = resdir
-        self.plist = plist
-
-        for fn in extra_scripts:
-            if fn.endswith('.py'):
-                fn = fn[:-3]
-            elif fn.endswith('.pyw'):
-                fn = fn[:-4]
-
-            src_fn = script_executable(arch=self.arch)
-            tgt_fn = os.path.join(self.appdir, 'Contents', 'MacOS', os.path.basename(fn))
-            mergecopy(src_fn, tgt_fn)
-            make_exec(tgt_fn)
-
-
-        site_path = os.path.join(resdir, 'site.py')
-        byte_compile([
-            SourceModule('site', site_path),
-            ],
-            target_dir=resdir,
-            optimize=self.optimize,
-            force=self.force,
-            verbose=self.verbose,
-            dry_run=self.dry_run)
-        if not self.dry_run:
-            os.unlink(site_path)
-
-
-        includedir = get_config_var('CONFINCLUDEPY')
-        configdir = get_config_var('LIBPL')
-
-
-        if includedir is None:
-            includedir = 'python%d.%d'%(sys.version_info[:2])
-        else:
-            includedir = os.path.basename(includedir)
-
-        if configdir is None:
-            configdir = 'config'
-        else:
-            configdir = os.path.basename(configdir)
-
-        self.compile_datamodels(resdir)
-        self.compile_mappingmodels(resdir)
-
-        bootfn = '__boot__'
-        bootfile = open(os.path.join(resdir, bootfn + '.py'), 'w')
-        for fn in target.prescripts:
-            bootfile.write(self.get_bootstrap_data(fn))
-            bootfile.write('\n\n')
-
-        bootfile.write("DEFAULT_SCRIPT=%r\n"%(os.path.basename(script),))
-        bootfile.write('try:\n')
-        bootfile.write('    _run()\n' % os.path.realpath(script))
         bootfile.write('except KeyboardInterrupt:\n')
         bootfile.write('    pass\n')
         bootfile.close()
@@ -1697,6 +1697,13 @@ class py2app(Command):
         realhome = os.path.join(sys.prefix, 'lib', 'python' + sys.version[:3])
         self.mkpath(pydir)
 
+        # The site.py file needs to be a two locations
+        # 1) in lib/pythonX.Y, to be found during normal startup and
+        #    by the 'python' executable
+        # 2) in the resources directory next to the script for
+        #    semistandalone builds (the lib/pythonX.Y directory is too
+        #    late on sys.path to be found in that case).
+        #
         if self.optimize:
             self.symlink('../../site.pyo', os.path.join(pydir, 'site.pyo'))
         else:
@@ -1743,7 +1750,8 @@ class py2app(Command):
 
             dst = os.path.join(pydir, os.path.basename(pkg))
             self.mkpath(dst)
-            self.copy_tree(pkg, dst)
+            self.copy_tree(pkg_path, dst)
+
         for copyext in copyexts:
             fn = os.path.join(ext_dir,
                 (copyext.identifier.replace('.', os.sep) +
@@ -1752,38 +1760,19 @@ class py2app(Command):
             self.mkpath(os.path.dirname(fn))
             copy_file(copyext.filename, fn, dry_run=self.dry_run)
 
-        if 0 and sys.version_info[:2] >= (3, 2) and not self.alias:
-            import encodings
-            import encodings.cp437
-            import encodings.utf_8
-            import encodings.latin_1
-            import codecs
-
-            encodings_dir = os.path.join(pydir, 'encodings')
-            self.mkpath(encodings_dir)
-
-            byte_compile([
-                    SourceModule('encodings.__init__', encodings.__file__),
-                    SourceModule('encodings.cp437', encodings.cp437.__file__),
-                    SourceModule('encodings.utf_8', encodings.utf_8.__file__),
-                    SourceModule('encodings.latin_1', encodings.latin_1.__file__),
-                    SourceModule('codecs', codecs.__file__),
-                ],
-                target_dir=pydir,
-                optimize=self.optimize,
-                force=self.force,
-                verbose=self.verbose,
-                dry_run=self.dry_run)
-
-            if not self.dry_run:
-                fp = open(os.path.join(encodings_dir, 'aliases.py'), 'w')
-                fp.write('aliases = {}\n')
-                fp.close()
-
         for src, dest in self.iter_data_files():
             dest = os.path.join(resdir, dest)
             if src == dest:
                 continue
+            makedirs(os.path.dirname(dest))
+            copy_resource(src, dest, dry_run=self.dry_run)
+
+        plugindir = os.path.join(appdir, 'Contents', 'Library')
+        for src, dest in self.iter_extra_plugins():
+            dest = os.path.join(plugindir, dest)
+            if src == dest:
+                continue
+
             makedirs(os.path.dirname(dest))
             copy_resource(src, dest, dry_run=self.dry_run)
 
