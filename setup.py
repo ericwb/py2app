@@ -390,19 +390,40 @@ class test (Command):
         finally:
             self.remove_from_sys_path()
 
-from setuptools.command import build_py
 
-class my_build_py (build_py.build_py):
-    def run(self):
-        if sys.platform != 'darwin':
-            raise DistutilsError("Py2app can only be used on Mac OS X")
+cmdclass = dict(
+    upload_docs=upload_docs,
+    test=test,
+)
+if sys.platform != 'darwin':
+    msg = "This distribution is only supported on MacOSX"
+    from distutils.command import build, install
+    from setuptools.command import develop, build_ext, install_lib, build_py
+    from distutils.errors import DistutilsPlatformError
 
-        build_py.build_py.run(self)
+
+    def create_command_subclass(base_class):
+        class subcommand (base_class):
+            def run(self):
+                raise DistutilsPlatformError(msg)
+        return subcommand
+
+    class no_test (test):
+        def run(self):
+            print("WARNING: %s\n"%(msg,))
+            print("SUMMARY: {'count': 0, 'fails': 0, 'errors': 0, 'xfails': 0, 'skip': 65, 'xpass': 0, 'message': msg }\n")
+
+    cmdclass['build'] = create_command_subclass(build.build)
+    cmdclass['test'] = no_test
+    cmdclass['install'] = create_command_subclass(install.install)
+    cmdclass['install_lib'] = create_command_subclass(install_lib.install_lib)
+    cmdclass['develop'] = create_command_subclass(develop.develop)
+    cmdclass['build_py'] = create_command_subclass(build_py.build_py)
 
 setup(
     # metadata
     name='py2app',
-    version='0.7.4',
+    version='0.8',
     description='Create standalone Mac OS X applications with Python',
     #author='Bob Ippolito',
     #author_email='bob@redivi.com',
@@ -416,15 +437,11 @@ setup(
     classifiers=CLASSIFIERS,
     install_requires=[
         "altgraph>=0.10.1",
-        "modulegraph>=0.10.3",
+        "modulegraph>=0.11",
         "macholib>=1.5",
     ],
     tests_require=tests_require,
-    cmdclass=dict(
-        build_py=my_build_py,
-        upload_docs=upload_docs,
-        test=test,
-    ),
+    cmdclass=cmdclass,
     packages=find_packages(exclude=['py2app_tests']),
     package_data={
         'py2app.recipes': [
