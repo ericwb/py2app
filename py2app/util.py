@@ -59,7 +59,7 @@ def path_to_zip(path):
             raise DistutilsFileError("File doesn't exist: %s"%(orig_path,))
 
         try:
-           zf = zipfile.ZipFile(path)
+            zf = zipfile.ZipFile(path)
         except zipfile.BadZipfile:
             raise DistutilsFileError("File doesn't exist: %s"%(orig_path,))
 
@@ -608,7 +608,7 @@ def _get_tool(toolname):
             # Support for Xcode 3.x and earlier
             if toolname == 'momc':
                 choices = [
-    	            '/Library/Application Support/Apple/Developer Tools/Plug-ins/XDCoreDataModel.xdplugin/Contents/Resources/momc',
+                    '/Library/Application Support/Apple/Developer Tools/Plug-ins/XDCoreDataModel.xdplugin/Contents/Resources/momc',
                     '/Developer/Library/Xcode/Plug-ins/XDCoreDataModel.xdplugin/Contents/Resources/momc',
                     '/Developer/usr/bin/momc',
                 ]
