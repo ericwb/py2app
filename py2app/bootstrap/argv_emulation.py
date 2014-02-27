@@ -112,6 +112,7 @@ def _run_argvemulator(timeout = 60):
     typeFSRef,          = struct.unpack('>i', b'fsrf')
     FALSE               = b'\0'
     TRUE                = b'\1'
+    eventLoopTimedOutErr = -9875
 
     kEventClassAppleEvent, = struct.unpack('>i', b'eppc')
     kEventAppleEvent = 1
@@ -173,8 +174,6 @@ def _run_argvemulator(timeout = 60):
                 print("argvemulator warning: cannot extract open document event")
                 continue
 
-            print("Adding: %s"%(repr(buf.value.decode('utf-8')),))
-
             if sys.version_info[0] > 2:
                 sys.argv.append(buf.value.decode('utf-8'))
             else:
@@ -230,7 +229,7 @@ def _run_argvemulator(timeout = 60):
             open_url_handler, 0, FALSE)
 
     # Remove the funny -psn_xxx_xxx argument
-    if len(sys.argv) > 1 and sys.argv[1][:4] == '-psn':
+    if len(sys.argv) > 1 and sys.argv[1].startswith('-psn_'):
         del sys.argv[1]
 
     start = time.time()
@@ -244,7 +243,11 @@ def _run_argvemulator(timeout = 60):
 
         sts = carbon.ReceiveNextEvent(1, ctypes.byref(eventType),
                 start + timeout[0] - now, TRUE, ctypes.byref(event))
-        if sts != 0:
+
+        if sts == eventLoopTimedOutErr:
+            break
+
+        elif sts != 0:
             print("argvemulator warning: fetching events failed")
             break
 
@@ -262,10 +265,8 @@ def _run_argvemulator(timeout = 60):
             open_url_handler, FALSE)
 
 def _argv_emulation():
-    import sys
+    import sys, os
     # only use if started by LaunchServices
-    for arg in sys.argv[1:]:
-        if arg.startswith('-psn'):
-            _run_argvemulator()
-            break
+    if os.environ.get('_PY2APP_LAUNCHED_'):
+        _run_argvemulator()
 _argv_emulation()

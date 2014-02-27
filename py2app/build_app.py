@@ -52,7 +52,7 @@ from py2app.filters import \
     not_stdlib_filter, not_system_filter, has_filename_filter
 from py2app import recipes
 
-from distutils.sysconfig import get_config_var
+from distutils.sysconfig import get_config_var, get_config_h_filename
 PYTHONFRAMEWORK=get_config_var('PYTHONFRAMEWORK')
 
 
@@ -258,15 +258,21 @@ def normalize_data_file(fn):
         return ('', [fn])
     return fn
 
-def is_system(executable=None):
-    if executable is None:
-        executable = sys.executable
-    return in_system_path(executable)
+def is_system():
+    prefix = sys.prefix
+    if os.path.exists(os.path.join(prefix, ".Python")):
+        fn = os.path.join(prefix, "lib", "python%d.%d"%(sys.version_info[:2]), "orig-prefix.txt")
+        if os.path.exists(fn):
+            with open(fn, 'rU') as fp:
+                prefix = fp.read().strip()
 
-def installation_info(executable=None, version=None):
+    return in_system_path(prefix)
+
+def installation_info(version=None):
     if version is None:
         version = sys.version
-    if is_system(executable):
+
+    if is_system():
         return version[:3] + " (FORCED: Using vendor Python)"
     else:
         return version[:3]
@@ -330,6 +336,10 @@ class py2app(Command):
          "Emulate the shell environment you get in a Terminal window"),
         ("use-pythonpath", None,
          "Allow PYTHONPATH to effect the interpreter's environment"),
+        ("use-faulthandler", None,
+         "Enable the faulthandler in the generated bundle (Python 3.3 or later)"),
+        ("verbose-interpreter", None,
+         "Start python in verbose mode"),
         ('bdist-base=', 'b',
          'base directory for build library (default is build)'),
         ('dist-dir=', 'd',
@@ -350,7 +360,7 @@ class py2app(Command):
         ("extra-scripts=", None, "set of scripts to include in the application bundle, next to the main application script"),
         ("include-plugins=", None, "List of plugins to include"),
         ("force-system-tk", None, "Ensure that Tkinter is linked against Apple's build of Tcl/Tk"),
-        ]
+    ]
 
     boolean_options = [
         #"compressed",
@@ -363,6 +373,8 @@ class py2app(Command):
         "argv-emulation",
         #"no-zip",
         "use-pythonpath",
+        "use-faulthandler",
+        "verbose-interpreter",
         "no-chdir",
         "debug-modulegraph",
         "debug-skip-macholib",
@@ -394,6 +406,8 @@ class py2app(Command):
         self.no_chdir = 0
         self.site_packages = False
         self.use_pythonpath = False
+        self.use_faulthandler = False
+        self.verbose_interpreter = False
         self.includes = None
         self.packages = None
         self.excludes = None
@@ -427,6 +441,9 @@ class py2app(Command):
             self.argv_inject = shlex.split(self.argv_inject)
         self.includes = set(fancy_split(self.includes))
         self.includes.add('encodings.*')
+
+        if self.use_faulthandler:
+            self.includes.add('faulthandler')
         #if sys.version_info[:2] >= (3, 2):
         #    self.includes.add('pkgutil')
         #    self.includes.add('imp')
@@ -563,6 +580,7 @@ class py2app(Command):
         else:
             dylib = 'libpython%s.dylib' % (sys.version[:3],)
             runtime = os.path.join(prefix, 'lib', dylib)
+
         return dylib, runtime
 
     def symlink(self, src, dst):
@@ -719,6 +737,8 @@ class py2app(Command):
                 emulate_shell_environment=bool(self.emulate_shell_environment),
                 no_chdir=bool(self.no_chdir),
                 prefer_ppc=self.prefer_ppc,
+                verbose=self.verbose_interpreter,
+                use_faulthandler=self.use_faulthandler,
             ),
         )
         if self.optimize:
@@ -765,7 +785,7 @@ class py2app(Command):
                 elif fn.endswith('.pyw'):
                     fn = fn[:-4]
 
-                src_fn = script_executable(arch=self.arch)
+                src_fn = script_executable(arch=self.arch, secondary=True)
                 tgt_fn = os.path.join(target.appdir, 'Contents', 'MacOS', os.path.basename(fn))
                 mergecopy(src_fn, tgt_fn)
                 make_exec(tgt_fn)
@@ -1294,8 +1314,12 @@ class py2app(Command):
             os.path.basename(info['name']),
             'Resources/Info.plist',
             'include/%s/pyconfig.h'%(includedir),
-            'lib/%s/%s/Makefile'%(pydir, configdir)
         ]
+        if '_sysconfigdata' not in sys.modules:
+            fmwkfiles.append(
+               'lib/%s/%s/Makefile'%(pydir, configdir)
+            )
+
         for fn in fmwkfiles:
             self.copy_file(
                 os.path.join(indir, fn),
@@ -1628,7 +1652,7 @@ class py2app(Command):
             elif fn.endswith('.pyw'):
                 fn = fn[:-4]
 
-            src_fn = script_executable(arch=self.arch)
+            src_fn = script_executable(arch=self.arch, secondary=True)
             tgt_fn = os.path.join(self.appdir, 'Contents', 'MacOS', os.path.basename(fn))
             mergecopy(src_fn, tgt_fn)
             make_exec(tgt_fn)
@@ -1717,15 +1741,20 @@ class py2app(Command):
             self.symlink(real_include, os.path.join(resdir, 'include'))
         else:
             self.mkpath(cfgdir)
-            for fn in 'Makefile', 'Setup', 'Setup.local', 'Setup.config':
-                rfn = os.path.join(realcfg, fn)
-                if os.path.exists(rfn):
-                    self.copy_file(rfn, os.path.join(cfgdir, fn))
+            if '_sysconfigdata' not in sys.modules:
+                # Recent enough versions of Python 2.7 and 3.x have
+                # an _sysconfigdata module and don't need the Makefile
+                # to provide the sysconfig data interface. Don't copy
+                # them.
+                for fn in 'Makefile', 'Setup', 'Setup.local', 'Setup.config':
+                    rfn = os.path.join(realcfg, fn)
+                    if os.path.exists(rfn):
+                       self.copy_file(rfn, os.path.join(cfgdir, fn))
 
             inc_dir = os.path.join(resdir, 'include', includedir)
             self.mkpath(inc_dir)
-            self.copy_file(os.path.join(real_include, '%s/pyconfig.h'%(
-                includedir)), os.path.join(inc_dir, 'pyconfig.h'))
+            self.copy_file(get_config_h_filename(), 
+                           os.path.join(inc_dir, 'pyconfig.h'))
 
 
         self.copy_file(arcname, arcdir)
@@ -1740,6 +1769,7 @@ class py2app(Command):
             preserve_symlinks=True)
         for pkg_name in self.packages:
             pkg = self.get_bootstrap(pkg_name)
+            print('XXXX', pkg_name, pkg)
 
             if self.semi_standalone:
                 # For semi-standalone builds don't copy packages
@@ -1749,7 +1779,7 @@ class py2app(Command):
                 if not not_stdlib_filter(p):
                     continue
 
-            dst = os.path.join(pydir, os.path.basename(pkg))
+            dst = os.path.join(pydir, pkg_name)
             self.mkpath(dst)
             self.copy_tree(pkg, dst)
 

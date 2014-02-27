@@ -1,10 +1,42 @@
 Release history
 ===============
 
+py2app 0.9
+----------
+
+-
+
+py2app 0.8.1
+------------
+
+-
+
 py2app 0.8
 -----------
 
 py2app 0.8 is a feature release
+
+
+- Fixed argv emulator on OSX 10.9, the way the code detected that the application
+  was launched through the Finder didn't work on that OSX release.
+
+- The launcher binary is now linked with Cocoa, that should avoid some problems
+  with sandboxed applications (in particular: standard open panels don't seem
+  to work properly in a sandboxed application when the main binary is not
+  linked to AppKit)
+
+- Don't copy Python's Makefile, Setup file and the like into a bundle when
+  sysconfig and distutils.sysconfig don't need these files (basicly, when
+  using any recent python version).
+
+- Fix some issues with virtualenv support:
+
+  * detection of system installs of Python didn't work properly when using
+    a virtualenv. Because of this py2app did not create a "semi-standalone"
+    bundle when using a virtualenv created with /usr/bin/python.
+
+  * "semi-standalone" bundles created from a virtualenv included more files
+    when they should (in particular bits of the stdlib)
 
 - Issue #92: Add option '--force-system-tk' which ensures that the _tkinter
   extension (used by Tkinter) is linked against the Apple build of Tcl/Tk,
@@ -269,12 +301,12 @@ py2app 0.7 is a bugfix release
 - Smarter matplotlib recipe, it is now possible to specify which backends should
   be included. Issue #44, reported by Adam Kovics.
 
-  The argument to ``--matplotlib-plugins`` (or 'matplotlib_plugins' in setup.py)
+  The argument to ``--matplotlib-backends`` (or 'matplotlib_backends' in setup.py)
   is a list of plugins to include. Use '-' to not include backends other than those
   found by the import statement analysis, and '*' to include all backends (without
   necessarily including all of matplotlib)
 
-  As an example, use ``--matplotlib-plugins=wxagg`` to include just the wxagg
+  As an example, use ``--matplotlib-backends=wxagg`` to include just the wxagg
   backend.
 
   Default is to include the entire matplotlib package.
