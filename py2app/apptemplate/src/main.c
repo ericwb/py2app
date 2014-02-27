@@ -8,6 +8,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <locale.h>
+#include <sys/utsname.h>
 
 /*
     Typedefs
@@ -77,7 +78,6 @@ USES(kCFTypeArrayCallBacks);
 USES(CFArrayCreateMutable);
 USES(CFRetain);
 USES(CFRelease);
-USES(CFBundleGetMainBundle);
 USES(CFBundleGetValueForInfoDictionaryKey);
 USES(CFArrayGetCount);
 USES(CFStringCreateWithCString);
@@ -195,7 +195,6 @@ static int bind_CoreFoundation(void) {
     LOOKUP(CFArrayCreateMutable);
     LOOKUP(CFRetain);
     LOOKUP(CFRelease);
-    LOOKUP(CFBundleGetMainBundle);
     LOOKUP(CFBundleGetValueForInfoDictionaryKey);
     LOOKUP(CFArrayGetCount);
     LOOKUP(CFStringCreateWithCString);
@@ -262,7 +261,7 @@ static CFTypeRef py2app_getKey(const char *key) {
         key, kCFStringEncodingUTF8);
     if (!cfKey) return NULL;
     rval = py2app_CFBundleGetValueForInfoDictionaryKey(
-        py2app_CFBundleGetMainBundle(),
+        CFBundleGetMainBundle(),
         cfKey);
     py2app_CFRelease(cfKey);
     return rval;
@@ -346,7 +345,7 @@ static CFStringRef pyStandardizePath(CFStringRef pyLocation) {
     if (foundRange.location == kCFNotFound || foundRange.length == 0) {
         return NULL;
     }
-    fmwkURL = py2app_CFBundleCopyPrivateFrameworksURL(py2app_CFBundleGetMainBundle());
+    fmwkURL = py2app_CFBundleCopyPrivateFrameworksURL(CFBundleGetMainBundle());
     foundRange.location = foundRange.length;
     foundRange.length = py2app_CFStringGetLength(pyLocation) - foundRange.length;
     subpath = py2app_CFStringCreateWithSubstring(NULL, pyLocation, foundRange);
@@ -450,7 +449,7 @@ static void py2app_setPythonPath(void) {
     CFDictionaryRef options;
 
     paths = py2app_CFArrayCreateMutable(NULL, 0, py2app_kCFTypeArrayCallBacks);
-    resDir = py2app_CFBundleCopyResourcesDirectoryURL(py2app_CFBundleGetMainBundle());
+    resDir = py2app_CFBundleCopyResourcesDirectoryURL(CFBundleGetMainBundle());
 
     resPath = pathFromURL(resDir);
     py2app_CFArrayAppendValue(paths, resPath);
@@ -529,7 +528,7 @@ static void py2app_setPythonPath(void) {
 static void setResourcePath(void) {
     CFURLRef resDir;
     CFStringRef resPath;
-    resDir = py2app_CFBundleCopyResourcesDirectoryURL(py2app_CFBundleGetMainBundle());
+    resDir = py2app_CFBundleCopyResourcesDirectoryURL(CFBundleGetMainBundle());
     resPath = pathFromURL(resDir);
     py2app_CFRelease(resDir);
     setcfenv("RESOURCEPATH", resPath);
@@ -567,7 +566,7 @@ static CFStringRef getMainScript(void) {
     e_pyo = py2app_CFSTR("pyo");
 
     cnt = py2app_CFArrayGetCount(possibleMains);
-    bndl = py2app_CFBundleGetMainBundle();
+    bndl = CFBundleGetMainBundle();
     path = NULL;
     for (i = 0; i < cnt; i++) {
         CFStringRef base;
@@ -613,7 +612,7 @@ static CFStringRef getPythonInterpreter(CFStringRef pyLocation) {
 
     auxName = py2app_getKey("PyExecutableName");
     if (!auxName) auxName = py2app_CFSTR("python");
-    bndl = py2app_CFBundleGetMainBundle();
+    bndl = CFBundleGetMainBundle();
     auxURL = py2app_CFBundleCopyAuxiliaryExecutableURL(bndl, auxName);
     if (auxURL) {
         path = pathFromURL(auxURL);
@@ -643,7 +642,7 @@ static CFStringRef getErrorScript(void) {
     py2app_CFArrayAppendValue(errorScripts, py2app_CFSTR("__error__.sh"));
 
     cnt = py2app_CFArrayGetCount(errorScripts);
-    bndl = py2app_CFBundleGetMainBundle();
+    bndl = CFBundleGetMainBundle();
     path = NULL;
     for (i = 0; i < cnt; i++) {
         CFStringRef base;
@@ -1139,10 +1138,12 @@ setup_asl(const char* appname)
 	do_asl_log_descriptor(cl, msg, 4 /* ASL_LEVEL_NOTICE */, 2, 2 /* ASL_LOG_DESCRIPTOR_WRITE */);
 }
 
+#ifndef PY2APP_SECONDARY
 static int
 have_psn_arg(int argc, char* const * argv)
 {
 	int i;
+
 	for (i = 0; i < argc; i++) {
 		if (strncmp(argv[i], "-psn_", 5) == 0) {
 			if (isdigit(argv[i][5])) {
@@ -1152,34 +1153,70 @@ have_psn_arg(int argc, char* const * argv)
 	}
 	return 0;
 }
+#endif /* !PY2APP_SECONDARY */
 
 
 int
 main(int argc, char * const *argv, char * const *envp)
 {
     int rval;
-    const char *bname;
 
-    if (have_psn_arg(argc, argv)) {
-	    /* Running as a GUI app started by launch
-	     * services, try to redirect stdout/stderr
-	     * to ASL.
-	     */
-	    bname = strrchr(argv[0], '/');
-	    if (bname == NULL) {
-		    bname = argv[0];
-	    } else {
-		    bname++;
+#ifndef PY2APP_SECONDARY
+    /* Running as a GUI app started by launch
+     * services, try to redirect stdout/stderr
+     * to ASL.
+     *
+     * NOTE: Detecting application bundles on OSX 10.9
+     * is annoyingly hard, the devnull trick is the least
+     * worst option I've found yet.
+     */
+    struct stat st;
+    struct utsname uts;
+    int is_app_bundle = 1;
+
+    if (uname(&uts) != -1) {
+        if (strcmp(uts.release, "13.") <= 0) {
+	    /* OSX 10.8 or earlier */
+            if (!have_psn_arg(argc, argv)) {
+                is_app_bundle = 0;
 	    }
+	} else {
+	    /* OSX 10.9 or later */
+            if (fstat(1, &st) != -1) {
+	        if (!S_ISCHR(st.st_mode) ||
+	            major(st.st_dev) != 3 ||
+     	            minor(st.st_dev) != 2) {
 
-	    setup_asl(bname);
+    	    	        /* We appear to be launched from the
+			 * command-line after all.
+		         */
+		        is_app_bundle = st.st_dev;
+	        }
+            }
+        }
     }
+
+
+    if (is_app_bundle) {
+        const char *bname;
+        setenv("_PY2APP_LAUNCHED_", "1", 1);
+
+        bname = strrchr(argv[0], '/');
+        if (bname == NULL) {
+	    bname = argv[0];
+        } else {
+	    bname++;
+        }
+
+        setup_asl(bname);
+    }
+#endif /* !PY2APP_SECONDARY */
 
     if (bind_CoreFoundation()) {
         fprintf(stderr, "CoreFoundation not found or functions missing\n");
         return -1;
     }
-    if (!py2app_CFBundleGetMainBundle()) {
+    if (!CFBundleGetMainBundle()) {
         fprintf(stderr, "Not bundled, exiting\n");
         return -1;
     }
