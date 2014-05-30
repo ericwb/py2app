@@ -14,6 +14,8 @@ import shlex
 import shutil
 import textwrap
 import pkg_resources
+import collections
+from modulegraph import modulegraph
 
 from py2app.apptemplate.setup import main as script_executable
 from py2app.util import mergecopy, make_exec
@@ -52,7 +54,7 @@ from py2app.filters import \
     not_stdlib_filter, not_system_filter, has_filename_filter
 from py2app import recipes
 
-from distutils.sysconfig import get_config_var
+from distutils.sysconfig import get_config_var, get_config_h_filename
 PYTHONFRAMEWORK=get_config_var('PYTHONFRAMEWORK')
 
 
@@ -286,7 +288,7 @@ class py2app(Command):
         ("app=", None,
          "application bundle to be built"),
         ("plugin=", None,
-         "puglin bundle to be built"),
+         "plugin bundle to be built"),
         ('optimize=', 'O',
          "optimization level: -O1 for \"python -O\", "
          "-O2 for \"python -OO\", and -O0 to disable [default: -O0]"),
@@ -360,6 +362,8 @@ class py2app(Command):
         ("extra-scripts=", None, "set of scripts to include in the application bundle, next to the main application script"),
         ("include-plugins=", None, "List of plugins to include"),
         ("force-system-tk", None, "Ensure that Tkinter is linked against Apple's build of Tcl/Tk"),
+        ("report-missing-from-imports", None, "Report the list of missing names for 'from module import name'"),
+        ("no-report-missing-conditional-import", None, "Don't report missing modules when they appear to be conditional imports"),
     ]
 
     boolean_options = [
@@ -382,6 +386,8 @@ class py2app(Command):
         "prefer-ppc",
         "emulate-shell-environment",
         "force-system-tk",
+        "report-missing-from-imports",
+        "no-report-missing-conditional-import",
     ]
 
     def initialize_options (self):
@@ -430,6 +436,8 @@ class py2app(Command):
         self.extra_scripts = None
         self.include_plugins = None
         self.force_system_tk = False
+        self.report_missing_from_imports = False
+        self.no_report_missing_conditional_import = False
 
     def finalize_options (self):
         if not self.strip:
@@ -863,6 +871,8 @@ class py2app(Command):
             traceback.print_exc()
             pdb.post_mortem(sys.exc_info()[2])
 
+        print("Done!")
+
     def filter_dependencies(self, mf, filters):
         print("*** filtering dependencies ***")
         nodes_seen, nodes_removed, nodes_orphaned = mf.filterStack(filters)
@@ -876,7 +886,8 @@ class py2app(Command):
 
     def build_xref(self, mf, flatpackages):
         for target in self.targets:
-            appdir = target.appdir
+            base = target.get_dest_base()
+            appdir = os.path.join(self.dist_dir, os.path.dirname(base))
             appname = self.get_appname()
             dgraph = os.path.join(appdir, appname + '.html')
             print("*** creating dependency html: %s ***"
@@ -942,9 +953,98 @@ class py2app(Command):
         if self.xref:
             self.build_xref(mf, flatpackages)
 
+
         py_files, extensions = self.finalize_modulefinder(mf)
         pkgdirs = self.collect_packagedirs()
         self.create_binaries(py_files, pkgdirs, extensions, loader_files)
+
+
+        missing = []
+        syntax_error = []
+        invalid_bytecode = []
+        for module in mf.nodes():
+            if isinstance(module, modulegraph.MissingModule):
+                if module.identifier != '__main__':
+                    missing.append(module)
+            elif isinstance(module, modulegraph.InvalidSourceModule):
+                syntax_error.append(module)
+            elif isinstance(module, modulegraph.InvalidCompiledModule):
+                invalid_bytecode.append(module)
+
+        if missing:
+            missing_unconditional = collections.defaultdict(set)
+            missing_fromimport = collections.defaultdict(set)
+            missing_fromimport_conditional = collections.defaultdict(set)
+            missing_conditional = collections.defaultdict(set)
+
+
+            for module in sorted(missing):
+                for m in mf.getReferers(module):
+                    if m is None: continue # XXX
+
+                    try:
+                        ed = mf.edgeData(m, module)
+                    except KeyError:
+                        ed = None
+
+                    if isinstance(ed, modulegraph.DependencyInfo):
+                        c = missing_unconditional
+                        if ed.conditional or ed.function:
+                            if ed.get('from_import'):
+                                c = missing_fromimport_conditional
+                            else:
+                                c = missing_conditional
+
+                        elif ed.get('from_import'):
+                            c = missing_fromimport
+
+                        c[module.identifier].add(m.identifier)
+
+                    else:
+                        missing_unconditional[module.identifier].add(m.identifier)
+
+            if missing_unconditional:
+                log.warn("Modules not found (unconditional imports):")
+                for m in sorted(missing_unconditional):
+                    log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_unconditional[m]))))
+                log.warn("")
+
+
+            if missing_conditional and not self.no_report_missing_conditional_import:
+                log.warn("Modules not found (conditional imports):")
+                for m in sorted(missing_conditional):
+                    log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_conditional[m]))))
+                log.warn("")
+
+            if self.report_missing_from_imports and (
+                    missing_fromimport or (
+                        not self.no_report_missing_conditional_import and missing_fromimport_conditional)):
+                log.warn("Modules not found ('from ... import y'):")
+                for m in sorted(missing_fromimport):
+                    log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_fromimport[m]))))
+
+                if not self.no_report_missing_conditional_import and missing_fromimport_conditional:
+                    log.warn("")
+                    log.warn("Conditional:")
+                    for m in sorted(missing_fromimport_conditional):
+                        log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_fromimport_conditional[m]))))
+
+                log.warn("")
+
+        if syntax_error:
+            log.warn("Modules with syntax errors:")
+            for module in sorted(syntax_error):
+                log.warn(" * %s"%(module.identifier))
+
+            log.warn("")
+
+        if invalid_bytecode:
+            log.warn("Modules with invalid bytecode:")
+            for module in sorted(invalid_bytecode):
+                log.warn(" * %s"%(module.identifier))
+
+            log.warn("")
+
 
     def create_directories(self):
         bdist_base = self.bdist_base
@@ -1316,7 +1416,7 @@ class py2app(Command):
             'include/%s/pyconfig.h'%(includedir),
         ]
         if '_sysconfigdata' not in sys.modules:
-            fwkfiles.append(
+            fmwkfiles.append(
                'lib/%s/%s/Makefile'%(pydir, configdir)
             )
 
@@ -1455,6 +1555,13 @@ class py2app(Command):
             prescripts.append('disable_linecache')
             prescripts.append('boot_' + self.style)
         else:
+
+            # Add ctypes prescript because it is needed to
+            # find libraries in the bundle, but we don't run
+            # recipes and hence the ctypes recipe is not used
+            # for alias builds.
+            prescripts.append('ctypes_setup')
+
             if self.additional_paths:
                 prescripts.append('path_inject')
                 prescripts.append(
@@ -1753,8 +1860,8 @@ class py2app(Command):
 
             inc_dir = os.path.join(resdir, 'include', includedir)
             self.mkpath(inc_dir)
-            self.copy_file(os.path.join(real_include, '%s/pyconfig.h'%(
-                includedir)), os.path.join(inc_dir, 'pyconfig.h'))
+            self.copy_file(get_config_h_filename(),
+                           os.path.join(inc_dir, 'pyconfig.h'))
 
 
         self.copy_file(arcname, arcdir)
