@@ -48,6 +48,8 @@ class TestExplicitIncludes (unittest.TestCase):
     python_args = []
     app_dir = os.path.join(DIR_NAME, 'basic_app')
 
+    maxDiff = None
+
     # Basic setup code
     #
     # The code in this block needs to be moved to
@@ -123,7 +125,7 @@ class TestExplicitIncludes (unittest.TestCase):
 
     #
     # End of setup code
-    # 
+    #
 
     def test_package_data(self):
         p = self.start_app()
@@ -138,7 +140,7 @@ class TestExplicitIncludes (unittest.TestCase):
         ln = p.stdout.readline()
         path = ln.decode('utf-8')[:-1]
 
-        
+
         self.assertTrue(os.path.basename(path) in ['__init__.py', '__init__.pyc', '__init__.pyo'])
         self.assertTrue(zipio.isfile(path))
 
@@ -164,6 +166,12 @@ class TestExplicitIncludesWithPackage (TestExplicitIncludes):
 
 class TestExplicitIncludesWithPackageSemiStandalone (TestExplicitIncludes):
     py2app_args = [ '--packages=package2', '--semi-standalone' ]
+
+class TestExplicitIncludesWithSubPackage (TestExplicitIncludes):
+    py2app_args = [ '--packages=package2.sub', ]
+
+class TestExplicitIncludesWithSubPackageSemiStandalone (TestExplicitIncludes):
+    py2app_args = [ '--packages=package2.sub', '--semi-standalone' ]
 
 if __name__ == "__main__":
     unittest.main()

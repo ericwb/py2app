@@ -59,7 +59,7 @@ def path_to_zip(path):
             raise DistutilsFileError("File doesn't exist: %s"%(orig_path,))
 
         try:
-           zf = zipfile.ZipFile(path)
+            zf = zipfile.ZipFile(path)
         except zipfile.BadZipfile:
             raise DistutilsFileError("File doesn't exist: %s"%(orig_path,))
 
@@ -148,6 +148,9 @@ def _copy_file(source, destination, preserve_mode=False, preserve_times=False, u
     log.info("copying file %s -> %s", source, destination)
     with zipio.open(source, 'rb') as fp_in:
         if not dry_run:
+            if os.path.exists(destination):
+                os.unlink(destination)
+
             with open(destination, 'wb') as fp_out:
                 data = fp_in.read()
                 fp_out.write(data)
@@ -600,7 +603,7 @@ def _get_tool(toolname):
     if toolname not in _tools:
         if os.path.exists('/usr/bin/xcrun'):
             try:
-                _tools[toolname] = check_output(['/usr/bin/xcrun', '-find', 'momc'])[:-1]
+                _tools[toolname] = check_output(['/usr/bin/xcrun', '-find', toolname])[:-1]
             except subprocess.CalledProcessError:
                 raise IOError("Tool %r not found"%(toolname,))
 
@@ -608,7 +611,7 @@ def _get_tool(toolname):
             # Support for Xcode 3.x and earlier
             if toolname == 'momc':
                 choices = [
-    	            '/Library/Application Support/Apple/Developer Tools/Plug-ins/XDCoreDataModel.xdplugin/Contents/Resources/momc',
+                    '/Library/Application Support/Apple/Developer Tools/Plug-ins/XDCoreDataModel.xdplugin/Contents/Resources/momc',
                     '/Developer/Library/Xcode/Plug-ins/XDCoreDataModel.xdplugin/Contents/Resources/momc',
                     '/Developer/usr/bin/momc',
                 ]
@@ -626,6 +629,7 @@ def _get_tool(toolname):
                     break
             else:
                 raise IOError("Tool %r not found"%(toolname,))
+    return _tools[toolname]
 
 
 def momc(src, dst):

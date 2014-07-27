@@ -2,10 +2,10 @@
 sys.argv emulation
 
 This module starts a basic event loop to collect file- and url-open AppleEvents. Those get
-converted to strings and stuffed into sys.argv. When that is done we continue starting 
+converted to strings and stuffed into sys.argv. When that is done we continue starting
 the application.
 
-This is a workaround to convert scripts that expect filenames on the command-line to work 
+This is a workaround to convert scripts that expect filenames on the command-line to work
 in a GUI environment. GUI applications should not use this feature.
 
 NOTE: This module uses ctypes and not the Carbon modules in the stdlib because the latter
@@ -37,12 +37,12 @@ def _ctypes_setup():
     timer_func = ctypes.CFUNCTYPE(
             None, ctypes.c_void_p, ctypes.c_long)
 
-    ae_callback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, 
+    ae_callback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
         ctypes.c_void_p, ctypes.c_void_p)
-    carbon.AEInstallEventHandler.argtypes = [ 
+    carbon.AEInstallEventHandler.argtypes = [
             ctypes.c_int, ctypes.c_int, ae_callback,
             ctypes.c_void_p, ctypes.c_char ]
-    carbon.AERemoveEventHandler.argtypes = [ 
+    carbon.AERemoveEventHandler.argtypes = [
             ctypes.c_int, ctypes.c_int, ae_callback,
             ctypes.c_char ]
 
@@ -51,13 +51,13 @@ def _ctypes_setup():
 
 
     carbon.ReceiveNextEvent.restype = ctypes.c_int
-    carbon.ReceiveNextEvent.argtypes = [ 
+    carbon.ReceiveNextEvent.argtypes = [
         ctypes.c_long,  ctypes.POINTER(EventTypeSpec),
         ctypes.c_double, ctypes.c_char,
         ctypes.POINTER(ctypes.c_void_p)
     ]
 
-    
+
     carbon.AEGetParamDesc.restype = ctypes.c_int
     carbon.AEGetParamDesc.argtypes = [
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
@@ -68,7 +68,7 @@ def _ctypes_setup():
             ctypes.POINTER(ctypes.c_long) ]
 
     carbon.AEGetNthDesc.restype = ctypes.c_int
-    carbon.AEGetNthDesc.argtypes = [ 
+    carbon.AEGetNthDesc.argtypes = [
             ctypes.c_void_p, ctypes.c_long, ctypes.c_int,
             ctypes.c_void_p, ctypes.c_void_p ]
 
@@ -76,7 +76,7 @@ def _ctypes_setup():
     carbon.AEGetDescDataSize.argtypes = [ ctypes.POINTER(AEDesc) ]
 
     carbon.AEGetDescData.restype = ctypes.c_int
-    carbon.AEGetDescData.argtypes = [ 
+    carbon.AEGetDescData.argtypes = [
             ctypes.POINTER(AEDesc),
             ctypes.c_void_p,
             ctypes.c_int,
@@ -112,6 +112,7 @@ def _run_argvemulator(timeout = 60):
     typeFSRef,          = struct.unpack('>i', b'fsrf')
     FALSE               = b'\0'
     TRUE                = b'\1'
+    eventLoopTimedOutErr = -9875
 
     kEventClassAppleEvent, = struct.unpack('>i', b'eppc')
     kEventAppleEvent = 1
@@ -173,8 +174,6 @@ def _run_argvemulator(timeout = 60):
                 print("argvemulator warning: cannot extract open document event")
                 continue
 
-            print("Adding: %s"%(repr(buf.value.decode('utf-8')),))
-
             if sys.version_info[0] > 2:
                 sys.argv.append(buf.value.decode('utf-8'))
             else:
@@ -225,12 +224,12 @@ def _run_argvemulator(timeout = 60):
 
         running[0] = False
         return 0
-    
+
     carbon.AEInstallEventHandler(kAEInternetSuite, kAEISGetURL,
             open_url_handler, 0, FALSE)
 
     # Remove the funny -psn_xxx_xxx argument
-    if len(sys.argv) > 1 and sys.argv[1][:4] == '-psn':
+    if len(sys.argv) > 1 and sys.argv[1].startswith('-psn_'):
         del sys.argv[1]
 
     start = time.time()
@@ -242,9 +241,13 @@ def _run_argvemulator(timeout = 60):
     while running[0] and now - start < timeout[0]:
         event = ctypes.c_void_p()
 
-        sts = carbon.ReceiveNextEvent(1, ctypes.byref(eventType), 
+        sts = carbon.ReceiveNextEvent(1, ctypes.byref(eventType),
                 start + timeout[0] - now, TRUE, ctypes.byref(event))
-        if sts != 0:
+
+        if sts == eventLoopTimedOutErr:
+            break
+
+        elif sts != 0:
             print("argvemulator warning: fetching events failed")
             break
 
@@ -252,9 +255,9 @@ def _run_argvemulator(timeout = 60):
         if sts != 0:
             print("argvemulator warning: processing events failed")
             break
-        
 
-    carbon.AERemoveEventHandler(kCoreEventClass, kAEOpenApplication, 
+
+    carbon.AERemoveEventHandler(kCoreEventClass, kAEOpenApplication,
             open_app_handler, FALSE)
     carbon.AERemoveEventHandler(kCoreEventClass, kAEOpenDocuments,
             open_file_handler, FALSE)
@@ -262,10 +265,8 @@ def _run_argvemulator(timeout = 60):
             open_url_handler, FALSE)
 
 def _argv_emulation():
-    import sys
+    import sys, os
     # only use if started by LaunchServices
-    for arg in sys.argv[1:]:
-        if arg.startswith('-psn'):
-            _run_argvemulator()
-            break
+    if os.environ.get('_PY2APP_LAUNCHED_'):
+        _run_argvemulator()
 _argv_emulation()

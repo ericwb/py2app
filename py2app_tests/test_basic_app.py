@@ -187,11 +187,11 @@ class TestBasicApp (unittest.TestCase):
             ln = p.stdout.readline()
             self.assertEqual(ln.strip(), b"xdrlib")
 
-        if sys.prefix.startswith('/System'):
+        if sys.prefix.startswith('/System') or '--alias' in self.py2app_args:
             # py2app is included as part of the system install
             p.stdin.write('import_module("py2app")\n'.encode('latin1'))
             p.stdin.flush()
-            ln = p.stdout.readline().decode('utf-8')
+            ln = p.stdout.readline()
             self.assertEqual(ln.strip(), b"py2app")
 
 
@@ -243,12 +243,19 @@ class TestBasicAliasApp (TestBasicApp):
 class TestBasicSemiStandaloneApp (TestBasicApp):
     py2app_args = [ '--semi-standalone', ]
 
+class TestBasicAppScriptName (unittest.TestCase):
+    app_dir = os.path.join(DIR_NAME, 'basic_app2')
     def test_email_not_included(self):
         path = os.path.join(
                 self.app_dir, 'dist/BasicApp.app/Contents/Resources/lib/python%d.%d' % sys.version_info[:2])
         if os.path.exists(os.path.join(path, 'email')):
             self.fail("'email' package copied into a semi-standalone build")
 
+class TestBasicAliasAppScriptName (TestBasicAppScriptName):
+    py2app_args = [ '--alias', ]
+
+class TestBasicSemiStandaloneAppScriptName (TestBasicAppScriptName):
+    py2app_args = [ '--semi-standalone', ]
 
 class TestBasicAppWindowsLineEnd (TestBasicApp):
     app_dir = os.path.join(DIR_NAME, 'basic_app_winle')
@@ -370,4 +377,3 @@ class TestOptimized2 (TestBasicApp):
 
 if __name__ == "__main__":
     unittest.main()
-
