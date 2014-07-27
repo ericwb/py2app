@@ -144,4 +144,3 @@ class TestBasicSemiStandaloneApp (TestBasicApp):
 
 if __name__ == "__main__":
     unittest.main()
-

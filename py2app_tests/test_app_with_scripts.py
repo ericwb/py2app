@@ -171,7 +171,7 @@ class TestBasicApp (unittest.TestCase):
 
     #
     # End of setup code
-    # 
+    #
 
     def test_helper1(self):
         p = self.run_script('helper1')
@@ -248,11 +248,11 @@ class TestBasicApp (unittest.TestCase):
             ln = p.stdout.readline()
             self.assertEqual(ln.strip(), b"xdrlib")
 
-        if sys.prefix.startswith('/System'):
+        if sys.prefix.startswith('/System') or '--alias' in self.py2app_args:
             # py2app is included as part of the system install
             p.stdin.write('import_module("py2app")\n'.encode('latin1'))
             p.stdin.flush()
-            ln = p.stdout.readline().decode('utf-8')
+            ln = p.stdout.readline()
             self.assertEqual(ln.strip(), b"py2app")
 
 
@@ -361,4 +361,3 @@ class TestOptimized2 (TestBasicApp):
 
 if __name__ == "__main__":
     unittest.main()
-

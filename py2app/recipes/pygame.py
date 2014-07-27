@@ -6,8 +6,9 @@ def check(cmd, mf):
     def addpath(f):
         return os.path.join(os.path.dirname(m.filename), f)
     RESOURCES = ['freesansbold.ttf', 'pygame_icon.tiff', 'pygame_icon.icns']
-    return dict(
+    result = dict(
         loader_files = [
             ('pygame', map(addpath, RESOURCES)),
         ],
     )
+    return result

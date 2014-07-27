@@ -1,6 +1,145 @@
 Release history
 ===============
 
+py2app 0.10
+-----------
+
+- ?
+
+py2app 0.9.1
+------------
+
+- ?
+
+py2app 0.9
+----------
+
+- issue #146, #147: The "python" binary in MyApp.app/Contents/MacOS was
+  the small stub exetable from framework builds, instead of the actual
+  command-line interpreter. The result is that you couldn't use
+  ``sys.executable`` to start a new interpreter, which (amongst others)
+  breaks multiprocessing.
+
+- pull request #7: Add support for PyQt5 to the sip recipe. Patch by
+  Mark Montague.
+
+- pull request #4: Copying PySide plugins was broken due to bad
+  indentation.
+
+- pull request #5: py2app was broken for python versions that
+  don't use _sysconfigdata.
+
+- issue #135: Don't sleep for a second after compiling a XIB file
+
+- issue #134: Remove target location before copying files into
+  the bundle.
+
+- issue #133: Ensure that the application's "Framework" folder
+  is on the search path for ``ctypes.util.find_library``.
+
+- issue #132: Depend on modulegraph 0.12 to avoid build errors
+  when the python code contains references to compatibility modules
+  that contain SyntaxErrors for the current python version.
+
+- Explicitly report modules that cannot be found at the end of
+  the run (for non-alias builds)
+
+  Note: This is just a warning, missing modules are not necessarily
+  a problem because modulegraph can detect imports for modules that
+  aren't used on OSX (for example)
+
+- Report modules that contain syntax errors at the end of
+  the run (for non-alias builds)
+
+  Note: This is just a warning, syntax errors be valid when the
+  dependency tree contains modules for the other major release
+  of python (e.g a compat_py2 module that contains compatibility
+  code for Python 2 and contains code that isn't valid Python 3)
+
+py2app 0.8.1
+------------
+
+- Loading scripts didn't work when --no-chdir was used
+
+  Reported by Barry Scott in private mail.
+
+py2app 0.8
+-----------
+
+py2app 0.8 is a feature release
+
+
+- Fixed argv emulator on OSX 10.9, the way the code detected that the application
+  was launched through the Finder didn't work on that OSX release.
+
+- The launcher binary is now linked with Cocoa, that should avoid some problems
+  with sandboxed applications (in particular: standard open panels don't seem
+  to work properly in a sandboxed application when the main binary is not
+  linked to AppKit)
+
+- Don't copy Python's Makefile, Setup file and the like into a bundle when
+  sysconfig and distutils.sysconfig don't need these files (basicly, when
+  using any recent python version).
+
+- Fix some issues with virtualenv support:
+
+  * detection of system installs of Python didn't work properly when using
+    a virtualenv. Because of this py2app did not create a "semi-standalone"
+    bundle when using a virtualenv created with /usr/bin/python.
+
+  * "semi-standalone" bundles created from a virtualenv included more files
+    when they should (in particular bits of the stdlib)
+
+- Issue #92: Add option '--force-system-tk' which ensures that the _tkinter
+  extension (used by Tkinter) is linked against the Apple build of Tcl/Tk,
+  even when it is linked to another framework in Python's std. library.
+
+  This will cause a build error when tkinter is linked with a major version of
+  Tcl/Tk that is not present in /System/Library/Frameworks.
+
+- Issue #80: Add support for copying system plugins into the application
+  bundle.
+
+  Py2app now supports a new option *include_plugins*. The value of this
+  is a list of paths to plugins that should be copied into the application
+  bundle.
+
+  Items in the list are either paths, or a tuple with the plugin type
+  and the path::
+
+      include_plugins=[
+        "MyPlugins/MyDocument.qlgenerator",
+        ("SystemConfiguration", "MyPlugins/MyConfig.plugin"),
+      ]
+
+  Py2app currently knows about the following plugin suffixes:
+  ``.qlgenerator``, ``.mdimporter``, ``.xpc``, ``.service``,
+  ``.prefPane``, ``.iaplugin`` and ``.action``. These plugins
+  can be added without specifying the plugin type.
+
+- Issue #83: Setup.py now refuses to install when the current
+  platform is not Mac OS X.
+
+  This makes it clear that the package is only supported on OSX and
+  avoids confusing errors later on.
+
+- Issue #39: It is now possible to have subpackages on
+  in the "packages" option of py2app.
+
+- Issue #37: Add recipe for pyEnchant
+
+  ..note::
+
+    The recipe only works for installations of pyEnchant
+    where pyEnchant is stored in the installation (such
+    as the binary eggs on PyPI), not for installations
+    that either use the "PYENCHANT_LIBRARY_PATH" environment
+    variable or MacPorts.
+
+- Issue #90: Removed the 'email' recipe, but require a new enough version
+  of modulegraph instead. Because of this py2app now requires modulegraph
+  0.11 or later.
+
 py2app 0.7.4
 ------------
 
@@ -214,12 +353,12 @@ py2app 0.7 is a bugfix release
 - Smarter matplotlib recipe, it is now possible to specify which backends should
   be included. Issue #44, reported by Adam Kovics.
 
-  The argument to ``--matplotlib-plugins`` (or 'matplotlib_plugins' in setup.py)
+  The argument to ``--matplotlib-backends`` (or 'matplotlib_backends' in setup.py)
   is a list of plugins to include. Use '-' to not include backends other than those
   found by the import statement analysis, and '*' to include all backends (without
   necessarily including all of matplotlib)
 
-  As an example, use ``--matplotlib-plugins=wxagg`` to include just the wxagg
+  As an example, use ``--matplotlib-backends=wxagg`` to include just the wxagg
   backend.
 
   Default is to include the entire matplotlib package.

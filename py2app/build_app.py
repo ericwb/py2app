@@ -14,6 +14,8 @@ import shlex
 import shutil
 import textwrap
 import pkg_resources
+import collections
+from modulegraph import modulegraph
 
 from py2app.apptemplate.setup import main as script_executable
 from py2app.util import mergecopy, make_exec
@@ -38,6 +40,8 @@ from modulegraph import zipio
 
 import macholib.dyld
 import macholib.MachOStandalone
+import macholib.MachO
+from macholib.util import flipwritable
 
 from py2app.create_appbundle import create_appbundle
 from py2app.create_pluginbundle import create_pluginbundle
@@ -50,13 +54,94 @@ from py2app.filters import \
     not_stdlib_filter, not_system_filter, has_filename_filter
 from py2app import recipes
 
-from distutils.sysconfig import get_config_var
+from distutils.sysconfig import get_config_var, get_config_h_filename
 PYTHONFRAMEWORK=get_config_var('PYTHONFRAMEWORK')
+
+
+PLUGIN_SUFFIXES = {
+        '.qlgenerator':    'QuickLook',
+        '.mdimporter':     'Spotlight',
+        '.xpc':            'XPCServices',
+        '.service':        'Services',
+        '.prefPane':       'PreferencePanes',
+        '.iaplugin':       'InternetAccounts',
+        '.action':         'Automator',
+}
 
 try:
     basestring
 except NameError:
     basestring = str
+
+def rewrite_tkinter_load_commands(tkinter_path):
+    print("rewrite_tk", tkinter_path)
+    m = macholib.MachO.MachO(tkinter_path)
+    tcl_path = None
+    tk_path = None
+
+    rewrite_map = {}
+
+    for header in m.headers:
+        for idx, name, other in header.walkRelocatables():
+            if other.endswith('/Tk'):
+                if tk_path is not None and other != tk_path:
+                    raise DistutilsPlatformError('_tkinter is linked to different Tk paths')
+                tk_path = other
+            elif other.endswith('/Tcl'):
+                if tcl_path is not None and other != tcl_path:
+                    raise DistutilsPlatformError('_tkinter is linked to different Tcl paths')
+                tcl_path = other
+
+    if tcl_path is None or 'Tcl.framework' not in tcl_path:
+        raise DistutilsPlatformError('_tkinter is not linked a Tcl.framework')
+
+    if tk_path is None or 'Tk.framework' not in tk_path:
+        raise DistutilsPlatformError('_tkinter is not linked a Tk.framework')
+
+    system_tcl_versions = [nm for nm in os.listdir('/System/Library/Frameworks/Tcl.framework/Versions') if nm != 'Current']
+    system_tk_versions = [nm for nm in os.listdir('/System/Library/Frameworks/Tk.framework/Versions') if nm != 'Current']
+
+    if not tcl_path.startswith('/System/Library/Frameworks'):
+        # ../Versions/8.5/Tcl
+        ver = os.path.basename(os.path.dirname(tcl_path))
+        if ver not in system_tcl_versions:
+            raise DistutilsPlatformError('_tkinter is linked to a version of Tcl not in /System')
+
+        rewrite_map[tcl_path] = '/System/Library/Frameworks/Tcl.framework/Versions/%s/Tcl'%(ver,)
+
+    if not tk_path.startswith('/System/Library/Frameworks'):
+        # ../Versions/8.5/Tk
+        ver = os.path.basename(os.path.dirname(tk_path))
+        if ver not in system_tk_versions:
+            raise DistutilsPlatformError('_tkinter is linked to a version of Tk not in /System')
+
+        rewrite_map[tk_path] = '/System/Library/Frameworks/Tk.framework/Versions/%s/Tk'%(ver,)
+
+    if rewrite_map:
+        print("Relinking _tkinter.so to system Tcl/Tk")
+        rewroteAny = False
+        for header in m.headers:
+            for idx, name, other in header.walkRelocatables():
+                data = rewrite_map.get(other)
+                if data:
+                    if header.rewriteDataForCommand(idx, data.encode(sys.getfilesystemencoding())):
+                        rewroteAny = True
+
+        if rewroteAny:
+            old_mode = flipwritable(m.filename)
+            try:
+                with open(m.filename, 'rb+') as f:
+                    for header in m.headers:
+                        f.seek(0)
+                        header.write(f)
+                        f.seek(0, 2)
+                        f.flush()
+
+            finally:
+                flipwritable(m.filename, old_mode)
+
+    else:
+        print("_tkinter already linked against system Tcl/Tk")
 
 
 def get_zipfile(dist, semi_standalone=False):
@@ -175,15 +260,21 @@ def normalize_data_file(fn):
         return ('', [fn])
     return fn
 
-def is_system(executable=None):
-    if executable is None:
-        executable = sys.executable
-    return in_system_path(executable)
+def is_system():
+    prefix = sys.prefix
+    if os.path.exists(os.path.join(prefix, ".Python")):
+        fn = os.path.join(prefix, "lib", "python%d.%d"%(sys.version_info[:2]), "orig-prefix.txt")
+        if os.path.exists(fn):
+            with open(fn, 'rU') as fp:
+                prefix = fp.read().strip()
 
-def installation_info(executable=None, version=None):
+    return in_system_path(prefix)
+
+def installation_info(version=None):
     if version is None:
         version = sys.version
-    if is_system(executable):
+
+    if is_system():
         return version[:3] + " (FORCED: Using vendor Python)"
     else:
         return version[:3]
@@ -197,7 +288,7 @@ class py2app(Command):
         ("app=", None,
          "application bundle to be built"),
         ("plugin=", None,
-         "puglin bundle to be built"),
+         "plugin bundle to be built"),
         ('optimize=', 'O',
          "optimization level: -O1 for \"python -O\", "
          "-O2 for \"python -OO\", and -O0 to disable [default: -O0]"),
@@ -240,13 +331,17 @@ class py2app(Command):
         ("alias", 'A',
          "Use an alias to current source file (for development only!)"),
         ("argv-emulation", 'a',
-         "Use argv emulation [disabled for plugins]. Does not work with python 3.x"),
+         "Use argv emulation [disabled for plugins]."),
         ("argv-inject=", None,
          "Inject some commands into the argv"),
         ("emulate-shell-environment", None,
          "Emulate the shell environment you get in a Terminal window"),
         ("use-pythonpath", None,
          "Allow PYTHONPATH to effect the interpreter's environment"),
+        ("use-faulthandler", None,
+         "Enable the faulthandler in the generated bundle (Python 3.3 or later)"),
+        ("verbose-interpreter", None,
+         "Start python in verbose mode"),
         ('bdist-base=', 'b',
          'base directory for build library (default is build)'),
         ('dist-dir=', 'd',
@@ -265,7 +360,11 @@ class py2app(Command):
         ("qt-plugins=", None, "set of Qt plugins to include in the application bundle (default None)"),
         ("matplotlib-backends=", None, "set of matplotlib backends to include (default: include entire package)"),
         ("extra-scripts=", None, "set of scripts to include in the application bundle, next to the main application script"),
-        ]
+        ("include-plugins=", None, "List of plugins to include"),
+        ("force-system-tk", None, "Ensure that Tkinter is linked against Apple's build of Tcl/Tk"),
+        ("report-missing-from-imports", None, "Report the list of missing names for 'from module import name'"),
+        ("no-report-missing-conditional-import", None, "Don't report missing modules when they appear to be conditional imports"),
+    ]
 
     boolean_options = [
         #"compressed",
@@ -278,12 +377,17 @@ class py2app(Command):
         "argv-emulation",
         #"no-zip",
         "use-pythonpath",
+        "use-faulthandler",
+        "verbose-interpreter",
         "no-chdir",
         "debug-modulegraph",
         "debug-skip-macholib",
         "graph",
         "prefer-ppc",
         "emulate-shell-environment",
+        "force-system-tk",
+        "report-missing-from-imports",
+        "no-report-missing-conditional-import",
     ]
 
     def initialize_options (self):
@@ -308,6 +412,8 @@ class py2app(Command):
         self.no_chdir = 0
         self.site_packages = False
         self.use_pythonpath = False
+        self.use_faulthandler = False
+        self.verbose_interpreter = False
         self.includes = None
         self.packages = None
         self.excludes = None
@@ -328,6 +434,10 @@ class py2app(Command):
         self.qt_plugins = None
         self.matplotlib_backends = None
         self.extra_scripts = None
+        self.include_plugins = None
+        self.force_system_tk = False
+        self.report_missing_from_imports = False
+        self.no_report_missing_conditional_import = False
 
     def finalize_options (self):
         if not self.strip:
@@ -339,13 +449,13 @@ class py2app(Command):
             self.argv_inject = shlex.split(self.argv_inject)
         self.includes = set(fancy_split(self.includes))
         self.includes.add('encodings.*')
+
+        if self.use_faulthandler:
+            self.includes.add('faulthandler')
         #if sys.version_info[:2] >= (3, 2):
         #    self.includes.add('pkgutil')
         #    self.includes.add('imp')
         self.packages = set(fancy_split(self.packages))
-        for pkg in self.packages:
-            if "." in pkg:
-                raise DistutilsOptionError("Cannot include subpackages using the 'packages' option")
 
         self.excludes = set(fancy_split(self.excludes))
         self.excludes.add('readline')
@@ -411,6 +521,7 @@ class py2app(Command):
         self.qt_plugins = fancy_split(self.qt_plugins)
         self.matplotlib_backends = fancy_split(self.matplotlib_backends)
         self.extra_scripts = fancy_split(self.extra_scripts)
+        self.include_plugins = fancy_split(self.include_plugins)
 
 
         if self.datamodels:
@@ -477,6 +588,7 @@ class py2app(Command):
         else:
             dylib = 'libpython%s.dylib' % (sys.version[:3],)
             runtime = os.path.join(prefix, 'lib', dylib)
+
         return dylib, runtime
 
     def symlink(self, src, dst):
@@ -584,6 +696,21 @@ class py2app(Command):
             self.mkpath(os.path.dirname(dest))
             mapc(src, dest)
 
+    def iter_extra_plugins(self):
+        for item in self.include_plugins:
+            if isinstance(item, (list, tuple)):
+                subdir, path = item
+
+            else:
+                ext = os.path.splitext(item)[1]
+                try:
+                    subdir = PLUGIN_SUFFIXES[ext]
+                    path = item
+                except KeyError:
+                    raise DistutilsOptionError("Cannot determine subdirectory for plugin %s"%(item,))
+
+            yield path, os.path.join(subdir, os.path.basename(path))
+
     def iter_data_files(self):
         dist = self.distribution
         allres = chain(getattr(dist, 'data_files', ()) or (), self.resources)
@@ -618,6 +745,8 @@ class py2app(Command):
                 emulate_shell_environment=bool(self.emulate_shell_environment),
                 no_chdir=bool(self.no_chdir),
                 prefer_ppc=self.prefer_ppc,
+                verbose=self.verbose_interpreter,
+                use_faulthandler=self.use_faulthandler,
             ),
         )
         if self.optimize:
@@ -664,7 +793,7 @@ class py2app(Command):
                 elif fn.endswith('.pyw'):
                     fn = fn[:-4]
 
-                src_fn = script_executable(arch=self.arch)
+                src_fn = script_executable(arch=self.arch, secondary=True)
                 tgt_fn = os.path.join(target.appdir, 'Contents', 'MacOS', os.path.basename(fn))
                 mergecopy(src_fn, tgt_fn)
                 make_exec(tgt_fn)
@@ -741,6 +870,8 @@ class py2app(Command):
             import pdb, sys, traceback
             traceback.print_exc()
             pdb.post_mortem(sys.exc_info()[2])
+
+        print("Done!")
 
     def filter_dependencies(self, mf, filters):
         print("*** filtering dependencies ***")
@@ -822,9 +953,98 @@ class py2app(Command):
         if self.xref:
             self.build_xref(mf, flatpackages)
 
+
         py_files, extensions = self.finalize_modulefinder(mf)
         pkgdirs = self.collect_packagedirs()
         self.create_binaries(py_files, pkgdirs, extensions, loader_files)
+
+
+        missing = []
+        syntax_error = []
+        invalid_bytecode = []
+        for module in mf.nodes():
+            if isinstance(module, modulegraph.MissingModule):
+                if module.identifier != '__main__':
+                    missing.append(module)
+            elif isinstance(module, modulegraph.InvalidSourceModule):
+                syntax_error.append(module)
+            elif hasattr(modulegraph, 'InvalidCompiledModule') and isinstance(module, modulegraph.InvalidCompiledModule):
+                invalid_bytecode.append(module)
+
+        if missing:
+            missing_unconditional = collections.defaultdict(set)
+            missing_fromimport = collections.defaultdict(set)
+            missing_fromimport_conditional = collections.defaultdict(set)
+            missing_conditional = collections.defaultdict(set)
+
+
+            for module in sorted(missing):
+                for m in mf.getReferers(module):
+                    if m is None: continue # XXX
+
+                    try:
+                        ed = mf.edgeData(m, module)
+                    except KeyError:
+                        ed = None
+
+                    if hasattr(modulegraph, 'DependencyInfo') and isinstance(ed, modulegraph.DependencyInfo):
+                        c = missing_unconditional
+                        if ed.conditional or ed.function:
+                            if ed.fromlist:
+                                c = missing_fromimport_conditional
+                            else:
+                                c = missing_conditional
+
+                        elif ed.fromlist:
+                            c = missing_fromimport
+
+                        c[module.identifier].add(m.identifier)
+
+                    else:
+                        missing_unconditional[module.identifier].add(m.identifier)
+
+            if missing_unconditional:
+                log.warn("Modules not found (unconditional imports):")
+                for m in sorted(missing_unconditional):
+                    log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_unconditional[m]))))
+                log.warn("")
+
+
+            if missing_conditional and not self.no_report_missing_conditional_import:
+                log.warn("Modules not found (conditional imports):")
+                for m in sorted(missing_conditional):
+                    log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_conditional[m]))))
+                log.warn("")
+
+            if self.report_missing_from_imports and (
+                    missing_fromimport or (
+                        not self.no_report_missing_conditional_import and missing_fromimport_conditional)):
+                log.warn("Modules not found ('from ... import y'):")
+                for m in sorted(missing_fromimport):
+                    log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_fromimport[m]))))
+
+                if not self.no_report_missing_conditional_import and missing_fromimport_conditional:
+                    log.warn("")
+                    log.warn("Conditional:")
+                    for m in sorted(missing_fromimport_conditional):
+                        log.warn(" * %s (%s)" % (m, ", ".join(sorted(missing_fromimport_conditional[m]))))
+
+                log.warn("")
+
+        if syntax_error:
+            log.warn("Modules with syntax errors:")
+            for module in sorted(syntax_error):
+                log.warn(" * %s"%(module.identifier))
+
+            log.warn("")
+
+        if invalid_bytecode:
+            log.warn("Modules with invalid bytecode:")
+            for module in sorted(invalid_bytecode):
+                log.warn(" * %s"%(module.identifier))
+
+            log.warn("")
+
 
     def create_directories(self):
         bdist_base = self.bdist_base
@@ -955,8 +1175,28 @@ class py2app(Command):
                         self.copy_file(os.path.join(prefix, rest_path), execdst)
 
                 else:
-                    self.copy_file(sys.executable, execdst)
+                    if PYTHONFRAMEWORK:
+                        # When we're using a python framework bin/python refers to a stub executable
+                        # that we don't want use, we need the executable in Resources/Python.app
+                        dpath = os.path.join(sys.prefix, 'Resources', 'Python.app', 'Contents', 'MacOS')
+                        self.copy_file(os.path.join(dpath, PYTHONFRAMEWORK), execdst)
+
+                    else:
+                        self.copy_file(sys.executable, execdst)
+
             if not self.debug_skip_macholib:
+                if self.force_system_tk:
+                    print("force system tk")
+                    resdir = os.path.join(dst, 'Contents', 'Resources')
+                    pydir = os.path.join(resdir, 'lib', 'python%s.%s'%(sys.version_info[:2]))
+                    ext_dir = os.path.join(pydir, os.path.basename(self.ext_dir))
+                    tkinter_path = os.path.join(ext_dir, '_tkinter.so')
+                    if os.path.exists(tkinter_path):
+                        rewrite_tkinter_load_commands(tkinter_path)
+                    else:
+                        print("tkinter not found at", tkinter_path)
+
+
                 mm = PythonStandalone(self, dst, executable_path=exp)
                 dylib, runtime = self.get_runtime()
                 if self.semi_standalone:
@@ -1181,8 +1421,12 @@ class py2app(Command):
             os.path.basename(info['name']),
             'Resources/Info.plist',
             'include/%s/pyconfig.h'%(includedir),
-            'lib/%s/%s/Makefile'%(pydir, configdir)
         ]
+        if '_sysconfigdata' not in sys.modules:
+            fmwkfiles.append(
+               'lib/%s/%s/Makefile'%(pydir, configdir)
+            )
+
         for fn in fmwkfiles:
             self.copy_file(
                 os.path.join(indir, fn),
@@ -1284,6 +1528,12 @@ class py2app(Command):
         #if self.style == 'app':
         #    prescripts.append('setup_pkgresource')
 
+        included_subpkg = [pkg for pkg in self.packages if '.' in pkg]
+        if included_subpkg:
+            prescripts.append('setup_included_subpackages')
+            prescripts.append(StringIO('_path_hooks = %r'%(
+                included_subpkg)))
+
         if self.emulate_shell_environment:
             prescripts.append('emulate_shell_environment')
 
@@ -1312,6 +1562,13 @@ class py2app(Command):
             prescripts.append('disable_linecache')
             prescripts.append('boot_' + self.style)
         else:
+
+            # Add ctypes prescript because it is needed to
+            # find libraries in the bundle, but we don't run
+            # recipes and hence the ctypes recipe is not used
+            # for alias builds.
+            prescripts.append('ctypes_setup')
+
             if self.additional_paths:
                 prescripts.append('path_inject')
                 prescripts.append(
@@ -1443,6 +1700,20 @@ class py2app(Command):
                 traceback.print_exc()
                 raise
 
+        plugindir = os.path.join(appdir, 'Contents', 'Library')
+        for src, dest in self.iter_extra_plugins():
+            dest = os.path.join(plugindir, dest)
+            if src == dest:
+                continue
+
+            makedirs(os.path.dirname(dest))
+            try:
+                copy_resource(src, dest, dry_run=self.dry_run)
+            except:
+                import traceback
+                traceback.print_exc()
+                raise
+
         # symlink frameworks
         for src in self.iter_frameworks():
             dest = os.path.join(
@@ -1482,7 +1753,6 @@ class py2app(Command):
         target.appdir = appdir
         return appdir
 
-
     def build_executable(self, target, arcname, pkgexts, copyexts, script, extra_scripts):
         # Build an executable for the target
         appdir, resdir, plist = self.create_bundle(target, script)
@@ -1496,139 +1766,7 @@ class py2app(Command):
             elif fn.endswith('.pyw'):
                 fn = fn[:-4]
 
-            src_fn = script_executable(arch=self.arch)
-            tgt_fn = os.path.join(self.appdir, 'Contents', 'MacOS', os.path.basename(fn))
-            mergecopy(src_fn, tgt_fn)
-            make_exec(tgt_fn)
-
-
-        site_path = os.path.join(resdir, 'site.py')
-        byte_compile([
-            SourceModule('site', site_path),
-            ],
-            target_dir=resdir,
-            optimize=self.optimize,
-            force=self.force,
-            verbose=self.verbose,
-            dry_run=self.dry_run)
-        if not self.dry_run:
-            os.unlink(site_path)
-
-
-        includedir = None
-        configdir = None
-        includedir = get_config_var('CONFINCLUDEPY')
-        configdir = get_config_var('LIBPL')
-
-
-        if includedir is None:
-            includedir = 'python%d.%d'%(sys.version_info[:2])
-        else:
-            includedir = os.path.basename(includedir)
-
-        if configdir is None:
-            configdir = 'config'
-        else:
-            configdir = os.path.basename(configdir)
-
-        self.compile_datamodels(resdir)
-        self.compile_mappingmodels(resdir)
-
-        bootfn = '__boot__'
-        bootfile = open(os.path.join(resdir, bootfn + '.py'), 'w')
-        for fn in target.prescripts:
-            bootfile.write(self.get_bootstrap_data(fn))
-            bootfile.write('\n\n')
-
-        bootfile.write("DEFAULT_SCRIPT=%r\n"%(os.path.basename(script),))
-        bootfile.write('try:\n')
-        bootfile.write('    _run()\n' % os.path.realpath(script))
-        bootfile.write('except KeyboardInterrupt:\n')
-        bootfile.write('    pass\n')
-        bootfile.close()
-
-        target.appdir = appdir
-        return appdir
-
-    def build_executable(self, target, arcname, pkgexts, copyexts, script, extra_scripts):
-        # Build an executable for the target
-        appdir, resdir, plist = self.create_bundle(target, script)
-        self.appdir = appdir
-        self.resdir = resdir
-        self.plist = plist
-
-        for fn in extra_scripts:
-            if fn.endswith('.py'):
-                fn = fn[:-3]
-            elif fn.endswith('.pyw'):
-                fn = fn[:-4]
-
-            src_fn = script_executable(arch=self.arch)
-            tgt_fn = os.path.join(self.appdir, 'Contents', 'MacOS', os.path.basename(fn))
-            mergecopy(src_fn, tgt_fn)
-            make_exec(tgt_fn)
-
-
-        site_path = os.path.join(resdir, 'site.py')
-        byte_compile([
-            SourceModule('site', site_path),
-            ],
-            target_dir=resdir,
-            optimize=self.optimize,
-            force=self.force,
-            verbose=self.verbose,
-            dry_run=self.dry_run)
-        if not self.dry_run:
-            os.unlink(site_path)
-
-
-        includedir = get_config_var('CONFINCLUDEPY')
-        configdir = get_config_var('LIBPL')
-
-
-        if includedir is None:
-            includedir = 'python%d.%d'%(sys.version_info[:2])
-        else:
-            includedir = os.path.basename(includedir)
-
-        if configdir is None:
-            configdir = 'config'
-        else:
-            configdir = os.path.basename(configdir)
-
-        self.compile_datamodels(resdir)
-        self.compile_mappingmodels(resdir)
-
-        bootfn = '__boot__'
-        bootfile = open(os.path.join(resdir, bootfn + '.py'), 'w')
-        for fn in target.prescripts:
-            bootfile.write(self.get_bootstrap_data(fn))
-            bootfile.write('\n\n')
-
-        bootfile.write("DEFAULT_SCRIPT=%r\n"%(os.path.basename(script),))
-        bootfile.write('try:\n')
-        bootfile.write('    _run()\n' % os.path.realpath(script))
-        bootfile.write('except KeyboardInterrupt:\n')
-        bootfile.write('    pass\n')
-        bootfile.close()
-
-        target.appdir = appdir
-        return appdir
-
-    def build_executable(self, target, arcname, pkgexts, copyexts, script, extra_scripts):
-        # Build an executable for the target
-        appdir, resdir, plist = self.create_bundle(target, script)
-        self.appdir = appdir
-        self.resdir = resdir
-        self.plist = plist
-
-        for fn in extra_scripts:
-            if fn.endswith('.py'):
-                fn = fn[:-3]
-            elif fn.endswith('.pyw'):
-                fn = fn[:-4]
-
-            src_fn = script_executable(arch=self.arch)
+            src_fn = script_executable(arch=self.arch, secondary=True)
             tgt_fn = os.path.join(self.appdir, 'Contents', 'MacOS', os.path.basename(fn))
             mergecopy(src_fn, tgt_fn)
             make_exec(tgt_fn)
@@ -1698,6 +1836,13 @@ class py2app(Command):
         realhome = os.path.join(sys.prefix, 'lib', 'python' + sys.version[:3])
         self.mkpath(pydir)
 
+        # The site.py file needs to be a two locations
+        # 1) in lib/pythonX.Y, to be found during normal startup and
+        #    by the 'python' executable
+        # 2) in the resources directory next to the script for
+        #    semistandalone builds (the lib/pythonX.Y directory is too
+        #    late on sys.path to be found in that case).
+        #
         if self.optimize:
             self.symlink('../../site.pyo', os.path.join(pydir, 'site.pyo'))
         else:
@@ -1710,15 +1855,20 @@ class py2app(Command):
             self.symlink(real_include, os.path.join(resdir, 'include'))
         else:
             self.mkpath(cfgdir)
-            for fn in 'Makefile', 'Setup', 'Setup.local', 'Setup.config':
-                rfn = os.path.join(realcfg, fn)
-                if os.path.exists(rfn):
-                    self.copy_file(rfn, os.path.join(cfgdir, fn))
+            if '_sysconfigdata' not in sys.modules:
+                # Recent enough versions of Python 2.7 and 3.x have
+                # an _sysconfigdata module and don't need the Makefile
+                # to provide the sysconfig data interface. Don't copy
+                # them.
+                for fn in 'Makefile', 'Setup', 'Setup.local', 'Setup.config':
+                    rfn = os.path.join(realcfg, fn)
+                    if os.path.exists(rfn):
+                       self.copy_file(rfn, os.path.join(cfgdir, fn))
 
             inc_dir = os.path.join(resdir, 'include', includedir)
             self.mkpath(inc_dir)
-            self.copy_file(os.path.join(real_include, '%s/pyconfig.h'%(
-                includedir)), os.path.join(inc_dir, 'pyconfig.h'))
+            self.copy_file(get_config_h_filename(),
+                           os.path.join(inc_dir, 'pyconfig.h'))
 
 
         self.copy_file(arcname, arcdir)
@@ -1733,6 +1883,7 @@ class py2app(Command):
             preserve_symlinks=True)
         for pkg_name in self.packages:
             pkg = self.get_bootstrap(pkg_name)
+            print('XXXX', pkg_name, pkg)
 
             if self.semi_standalone:
                 # For semi-standalone builds don't copy packages
@@ -1742,7 +1893,7 @@ class py2app(Command):
                 if not not_stdlib_filter(p):
                     continue
 
-            dst = os.path.join(pydir, os.path.basename(pkg))
+            dst = os.path.join(pydir, pkg_name)
             self.mkpath(dst)
             self.copy_tree(pkg, dst)
 
@@ -1757,38 +1908,19 @@ class py2app(Command):
             self.mkpath(os.path.dirname(fn))
             copy_file(copyext.filename, fn, dry_run=self.dry_run)
 
-        if 0 and sys.version_info[:2] >= (3, 2) and not self.alias:
-            import encodings
-            import encodings.cp437
-            import encodings.utf_8
-            import encodings.latin_1
-            import codecs
-
-            encodings_dir = os.path.join(pydir, 'encodings')
-            self.mkpath(encodings_dir)
-
-            byte_compile([
-                    SourceModule('encodings.__init__', encodings.__file__),
-                    SourceModule('encodings.cp437', encodings.cp437.__file__),
-                    SourceModule('encodings.utf_8', encodings.utf_8.__file__),
-                    SourceModule('encodings.latin_1', encodings.latin_1.__file__),
-                    SourceModule('codecs', codecs.__file__),
-                ],
-                target_dir=pydir,
-                optimize=self.optimize,
-                force=self.force,
-                verbose=self.verbose,
-                dry_run=self.dry_run)
-
-            if not self.dry_run:
-                fp = open(os.path.join(encodings_dir, 'aliases.py'), 'w')
-                fp.write('aliases = {}\n')
-                fp.close()
-
         for src, dest in self.iter_data_files():
             dest = os.path.join(resdir, dest)
             if src == dest:
                 continue
+            makedirs(os.path.dirname(dest))
+            copy_resource(src, dest, dry_run=self.dry_run)
+
+        plugindir = os.path.join(appdir, 'Contents', 'Library')
+        for src, dest in self.iter_extra_plugins():
+            dest = os.path.join(plugindir, dest)
+            if src == dest:
+                continue
+
             makedirs(os.path.dirname(dest))
             copy_resource(src, dest, dry_run=self.dry_run)
 
