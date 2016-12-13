@@ -1384,6 +1384,10 @@ class py2app(Command):
 
         indir = os.path.dirname(os.path.join(info['location'], info['name']))
         outdir = os.path.dirname(os.path.join(dst, info['name']))
+        if os.path.exists(outdir):
+            # Python framework has already been created.
+            return
+        
         self.mkpath(os.path.join(outdir, 'Resources'))
         pydir = 'python%s.%s'%(sys.version_info[:2])
 
@@ -1894,8 +1898,11 @@ class py2app(Command):
                     continue
 
             dst = os.path.join(pydir, pkg_name)
-            self.mkpath(dst)
-            self.copy_tree(pkg, dst)
+            if os.path.isdir(pkg):
+                self.mkpath(dst)
+                self.copy_tree(pkg, dst)
+            else:
+                self.copy_file(pkg, dst + '.py')
 
             # FIXME: The python files should be bytecompiled
             #        here (see issue 101)
